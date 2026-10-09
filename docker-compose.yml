@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: backend
+      POSTGRES_USER: backend
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-backend-local-only}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/000001_init.up.sql:/docker-entrypoint-initdb.d/000001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U backend -d backend"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.5
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin-local-only}
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./config/keycloak/backend-realm.json:/opt/keycloak/data/import/backend-realm.json:ro
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://backend:${POSTGRES_PASSWORD:-backend-local-only}@postgres:5432/backend?sslmode=disable
+      KEYCLOAK_ISSUER_URL: http://localhost:8081/realms/backend
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/backend/protocol/openid-connect/certs
+      OIDC_AUDIENCE: backend-api
+      HTTP_ADDR: :8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    restart: on-failure
+
+volumes:
+  postgres_data:

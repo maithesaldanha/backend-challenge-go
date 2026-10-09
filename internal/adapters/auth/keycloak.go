@@ -17,10 +17,11 @@ import (
 var ErrInvalidConfig = errors.New("invalid keycloak configuration")
 
 type Config struct {
-	IssuerURL string
-	JWKSURL   string
-	Audience  string
-	ClockSkew time.Duration
+	IssuerURL       string
+	JWKSURL         string
+	Audience        string
+	ClockSkew       time.Duration
+	JWKSHTTPTimeout time.Duration
 }
 
 type realmAccess struct {
@@ -50,8 +51,12 @@ func Module(config Config) fx.Option {
 
 func NewKeycloakAuthenticator(lifecycle fx.Lifecycle, config Config) (ports.Authenticator, error) {
 	if !validEndpoint(config.IssuerURL) || !validEndpoint(config.JWKSURL) ||
-		strings.TrimSpace(config.Audience) == "" || config.ClockSkew < 0 {
+		strings.TrimSpace(config.Audience) == "" || config.ClockSkew < 0 ||
+		config.ClockSkew > time.Minute || config.JWKSHTTPTimeout < 0 {
 		return nil, ErrInvalidConfig
+	}
+	if config.JWKSHTTPTimeout == 0 {
+		config.JWKSHTTPTimeout = 5 * time.Second
 	}
 	authenticator := &KeycloakAuthenticator{config: config}
 	lifecycle.Append(fx.Hook{
@@ -63,10 +68,14 @@ func NewKeycloakAuthenticator(lifecycle fx.Lifecycle, config Config) (ports.Auth
 
 func (a *KeycloakAuthenticator) start(context.Context) error {
 	keyCtx, cancel := context.WithCancel(context.Background())
-	keys, err := keyfunc.NewDefaultCtx(keyCtx, []string{a.config.JWKSURL})
+	noErrorOnInitialFetch := false
+	keys, err := keyfunc.NewDefaultOverrideCtx(keyCtx, []string{a.config.JWKSURL}, keyfunc.Override{
+		HTTPTimeout:               a.config.JWKSHTTPTimeout,
+		NoErrorReturnFirstHTTPReq: &noErrorOnInitialFetch,
+	})
 	if err != nil {
 		cancel()
-		return err
+		return errors.New("unable to load Keycloak signing keys")
 	}
 	a.mu.Lock()
 	a.keys = keys
@@ -121,5 +130,6 @@ func (a *KeycloakAuthenticator) Authenticate(ctx context.Context, rawToken strin
 
 func validEndpoint(raw string) bool {
 	parsed, err := url.ParseRequestURI(raw)
-	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != ""
+	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") &&
+		parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == ""
 }

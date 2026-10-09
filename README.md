@@ -1,5 +1,68 @@
 # Desafio Backend — Processamento Distribuído de Apostas em Go
 
+## Estado atual
+
+O repositório está em implementação incremental. Neste momento, estão disponíveis o domínio básico, persistência PostgreSQL, abertura de carteira e processamento de aposta, além de `POST /wallets` protegido por Keycloak. Consumidor SQS, demais operações de aposta, workers de inbox/outbox, health checks e testes abrangentes ainda não estão implementados. O Compose abaixo sobe a infraestrutura local e a API para exercitar a abertura de carteira.
+
+## Executar localmente com Docker Compose
+
+Pré-requisitos: Docker Desktop com Compose e Go compatível com a versão declarada em `go.mod`.
+
+1. Copie `.env.example` para `.env` na raiz. No PowerShell: `Copy-Item .env.example .env`. Os valores são apenas para desenvolvimento local.
+2. Inicie os serviços:
+
+```powershell
+docker compose up --build
+```
+
+O PostgreSQL fica disponível na porta `5433`, o Keycloak na `8081` e a API na `8080`. O schema inicial é aplicado automaticamente quando o volume do PostgreSQL é criado pela primeira vez. Se já existir um volume antigo, aplique as migrations conforme a seção abaixo; `docker compose down -v` apaga os dados locais.
+
+O realm `backend` configura o client de serviço `wallet-service`, o audience `backend-api` e a role `wallet:write`. Para obter um token de desenvolvimento:
+
+```powershell
+$tokenResponse = Invoke-RestMethod -Method Post -Uri http://localhost:8081/realms/backend/protocol/openid-connect/token -ContentType 'application/x-www-form-urlencoded' -Body @{ grant_type = 'client_credentials'; client_id = 'wallet-service'; client_secret = 'wallet-local-secret' }
+$token = $tokenResponse.access_token
+```
+
+Abra uma carteira enviando UUID válido para `playerId`:
+
+```powershell
+$body = @{ playerId = '0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1'; initialBalance = @{ amount = '1000.00'; currency = 'BRL' } } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/wallets -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body $body
+```
+
+O saldo deve ser string decimal com duas casas. Repetir o mesmo jogador e moeda retorna conflito (`409`). O segredo e as senhas do Compose não devem ser usados fora da máquina local.
+
+Para parar os serviços sem apagar dados:
+
+```powershell
+docker compose down
+```
+
+Para remover também o banco local:
+
+```powershell
+docker compose down -v
+```
+
+## Migrations
+
+No ambiente Compose, a migration inicial roda automaticamente somente na criação de um volume vazio. Em um banco vazio fora desse fluxo, aplique a migration inicial; a reversão remove as tabelas e os dados do desafio:
+
+```powershell
+Get-Content migrations/000001_init.up.sql | docker compose exec -T postgres psql -U backend -d backend
+Get-Content migrations/000001_init.down.sql | docker compose exec -T postgres psql -U backend -d backend
+```
+
+## Verificações disponíveis
+
+```powershell
+go build ./...
+go vet ./...
+```
+
+Os comandos `go test ./...` e `go test -race ./...` ainda dependem da implementação dos testes exigidos pelo desafio.
+
 Implemente um serviço em **Go**, com **Uber Fx**, para processar operações financeiras de provedores de jogos em um ambiente distribuído.
 
 ## 1. Objetivo
