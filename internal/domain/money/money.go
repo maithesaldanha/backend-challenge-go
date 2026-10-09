@@ -92,6 +92,13 @@ func Zero(currency string) (Money, error) {
 	return Money{currency: currency}, nil
 }
 
+func FromMinorUnits(amount int64, currency string) (Money, error) {
+	if !validCurrency(currency) {
+		return Money{}, ErrInvalidCurrency
+	}
+	return Money{minorUnits: amount, currency: currency}, nil
+}
+
 func (m Money) AmountMinor() (int64, error) {
 	if !m.valid() {
 		return 0, ErrUninitializedMoney

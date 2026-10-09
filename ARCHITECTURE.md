@@ -8,6 +8,8 @@ The domain packages do not depend on HTTP, SQS, Fx, or PostgreSQL. `Money` store
 
 The initial schema uses PostgreSQL constraints for wallet uniqueness, non-negative balances, operation idempotency keys, provider transaction IDs, ledger arithmetic, and opening uniqueness. A wallet update, transaction result, ledger entry, inbox completion, and outbox events must be written in one SQL transaction where applicable.
 
+The PostgreSQL adapter uses `database/sql` and explicit SQL. A caller supplies a registered PostgreSQL driver when opening the `*sql.DB`; driver registration and application composition are not implemented yet. Money maps to `BIGINT` minor units and a three-character currency code.
+
 Writers should serialize by wallet row using `SELECT ... FOR UPDATE`. This keeps independent wallets parallel and prevents two database processes from spending the same balance. The database constraints remain the final guard if application code or another writer violates the expected sequence.
 
 Application persistence ports expose one `UnitOfWork` per SQL transaction. The wallet lock, idempotency lookup, wager state change, wallet update, ledger append, and outbox writes must use repositories from that same unit. `WalletRepository.Save` receives the version read before mutation so the SQL update can also use a version predicate.
@@ -30,4 +32,4 @@ A processed bet may have one successful direct reversal: either `REFUND` or `ROL
 
 ## Current implementation boundary
 
-The `ProcessBet` application use case handles synchronous bets through the persistence ports. It checks idempotent replays, locks the wallet row through the repository, and commits the wager, balance, ledger, and resulting outbox events together. The SQL adapters, other wager kinds, retry workers, event publishing, authentication, HTTP, SQS, and Fx lifecycle remain to be added. The migration has not yet been applied against PostgreSQL in this workspace.
+The `ProcessBet` application use case handles synchronous bets through the persistence ports. It checks idempotent replays, locks the wallet row through the repository, and commits the wager, balance, ledger, and resulting outbox events together. The SQL adapter implements these ports with one `sql.Tx` per unit of work. Other wager kinds, retry workers, event publishing, authentication, HTTP, SQS, Fx lifecycle, and database driver registration remain to be added. The migration has not yet been applied against PostgreSQL in this workspace.
