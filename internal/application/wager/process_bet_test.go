@@ -2,7 +2,6 @@ package wager
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -141,7 +140,7 @@ type memoryUnit struct {
 func newMemoryUnit(account domainwallet.Wallet) *memoryUnit {
 	return &memoryUnit{
 		wallets: &memoryWallets{account: account},
-		wagers:  &memoryWagers{byKey: make(map[string]domainwager.Transaction), byExternalID: make(map[string]domainwager.Transaction)},
+		wagers:  &memoryWagers{byKey: make(map[string]domainwager.Transaction), byExternalID: make(map[string]domainwager.Transaction), attempts: make(map[string]int), retryAt: make(map[string]time.Time), leaseUntil: make(map[string]time.Time)},
 		ledger:  &memoryLedger{},
 		outbox:  &memoryOutbox{},
 	}
@@ -177,6 +176,9 @@ func (r *memoryWallets) Save(_ context.Context, account domainwallet.Wallet, exp
 type memoryWagers struct {
 	byKey        map[string]domainwager.Transaction
 	byExternalID map[string]domainwager.Transaction
+	attempts     map[string]int
+	retryAt      map[string]time.Time
+	leaseUntil   map[string]time.Time
 }
 
 func (r *memoryWagers) GetByID(_ context.Context, id string) (domainwager.Transaction, error) {
@@ -204,24 +206,56 @@ func (r *memoryWagers) FindByExternalTransactionID(_ context.Context, providerID
 	return transaction, nil
 }
 
-func (r *memoryWagers) FindReference(context.Context, string, string) (domainwager.Transaction, error) {
+func (r *memoryWagers) FindReference(ctx context.Context, providerID, externalID string) (domainwager.Transaction, error) {
+	return r.FindByExternalTransactionID(ctx, providerID, externalID)
+}
+
+func (r *memoryWagers) FindDuePendingReference(_ context.Context, now time.Time) (domainwager.Transaction, error) {
+	for _, transaction := range r.byKey {
+		if transaction.Status() != domainwager.PendingReference {
+			continue
+		}
+		nextAttempt, exists := r.retryAt[transaction.ID()]
+		if !exists {
+			nextAttempt = transaction.UpdatedAt()
+		}
+		if nextAttempt.After(now) || r.leaseUntil[transaction.ID()].After(now) {
+			continue
+		}
+		return transaction, nil
+	}
 	return domainwager.Transaction{}, ports.ErrNotFound
 }
 
-func (r *memoryWagers) FindDuePendingReference(context.Context, time.Time) (domainwager.Transaction, error) {
-	return domainwager.Transaction{}, ports.ErrNotFound
+func (r *memoryWagers) ClaimPendingReference(ctx context.Context, id string, now, leaseUntil time.Time) (int, error) {
+	transaction, err := r.GetByID(ctx, id)
+	if err != nil || transaction.Status() != domainwager.PendingReference {
+		return 0, ports.ErrConflict
+	}
+	nextAttempt, exists := r.retryAt[id]
+	if exists && nextAttempt.After(now) || r.leaseUntil[id].After(now) {
+		return 0, ports.ErrConflict
+	}
+	r.attempts[id]++
+	r.leaseUntil[id] = leaseUntil
+	return r.attempts[id], nil
 }
 
-func (r *memoryWagers) ClaimPendingReference(context.Context, string, time.Time, time.Time) (int, error) {
-	return 0, ports.ErrConflict
+func (r *memoryWagers) SchedulePendingReference(_ context.Context, id string, nextAttempt time.Time) error {
+	r.retryAt[id] = nextAttempt
+	r.leaseUntil[id] = time.Time{}
+	return nil
 }
 
-func (r *memoryWagers) SchedulePendingReference(context.Context, string, time.Time) error {
-	return errors.New("unexpected pending reference scheduling")
-}
-
-func (r *memoryWagers) FindProcessedReversals(context.Context, string) ([]domainwager.Transaction, error) {
-	return nil, nil
+func (r *memoryWagers) FindProcessedReversals(_ context.Context, referenceID string) ([]domainwager.Transaction, error) {
+	var transactions []domainwager.Transaction
+	for _, transaction := range r.byKey {
+		if transaction.Status() == domainwager.Processed && transaction.ReferenceTransactionID() == referenceID &&
+			(transaction.Kind() == domainwager.Refund || transaction.Kind() == domainwager.Rollback) {
+			transactions = append(transactions, transaction)
+		}
+	}
+	return transactions, nil
 }
 
 func (r *memoryWagers) Create(_ context.Context, transaction domainwager.Transaction) error {
@@ -235,11 +269,22 @@ func (r *memoryWagers) Create(_ context.Context, transaction domainwager.Transac
 	}
 	r.byKey[key] = transaction
 	r.byExternalID[externalID] = transaction
+	if transaction.Status() == domainwager.PendingReference {
+		r.retryAt[transaction.ID()] = transaction.UpdatedAt()
+	}
 	return nil
 }
 
-func (r *memoryWagers) Save(context.Context, domainwager.Transaction) error {
-	return errors.New("unexpected wager update")
+func (r *memoryWagers) Save(_ context.Context, transaction domainwager.Transaction) error {
+	key := transaction.ProviderID() + "/" + transaction.IdempotencyKey()
+	if _, exists := r.byKey[key]; !exists {
+		return ports.ErrNotFound
+	}
+	r.byKey[key] = transaction
+	r.byExternalID[transaction.ProviderID()+"/"+transaction.ExternalTransactionID()] = transaction
+	r.retryAt[transaction.ID()] = transaction.UpdatedAt()
+	r.leaseUntil[transaction.ID()] = time.Time{}
+	return nil
 }
 
 type memoryLedger struct{ entries []domainwallet.LedgerEntry }
