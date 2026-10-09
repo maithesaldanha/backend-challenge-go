@@ -95,6 +95,40 @@ func (w Wallet) CreatedAt() time.Time { return w.createdAt }
 
 func (w Wallet) UpdatedAt() time.Time { return w.updatedAt }
 
+func NewOpeningEntry(ledgerID, walletID, transactionID string, amount money.Money, now time.Time) (LedgerEntry, error) {
+	if ledgerID == "" || walletID == "" || transactionID == "" {
+		return LedgerEntry{}, ErrInvalidIdentity
+	}
+	if now.IsZero() || now.Location() != time.UTC {
+		return LedgerEntry{}, ErrInvalidTimestamp
+	}
+	minor, err := amount.AmountMinor()
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	if minor <= 0 {
+		return LedgerEntry{}, ErrInvalidMovement
+	}
+	currency, err := amount.Currency()
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	zero, err := money.Zero(currency)
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	return LedgerEntry{
+		id:            ledgerID,
+		walletID:      walletID,
+		transactionID: transactionID,
+		direction:     Credit,
+		money:         amount,
+		balanceBefore: zero,
+		balanceAfter:  amount,
+		createdAt:     now,
+	}, nil
+}
+
 func (w *Wallet) Debit(ledgerID, transactionID string, amount money.Money, now time.Time) (LedgerEntry, error) {
 	return w.move(ledgerID, transactionID, amount, now, Debit)
 }

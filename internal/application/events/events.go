@@ -21,8 +21,8 @@ type Event struct {
 
 type WagerTransactionProcessedData struct {
 	TransactionID         string      `json:"transactionId"`
-	ProviderID            string      `json:"providerId"`
-	ExternalTransactionID string      `json:"externalTransactionId"`
+	ProviderID            string      `json:"providerId,omitempty"`
+	ExternalTransactionID string      `json:"externalTransactionId,omitempty"`
 	Kind                  wager.Kind  `json:"kind"`
 	Money                 money.Money `json:"money"`
 	ResultBalance         money.Money `json:"resultBalance"`
