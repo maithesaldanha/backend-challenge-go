@@ -72,14 +72,13 @@ func (p *ProcessBet) Execute(ctx context.Context, command BetCommand) (BetResult
 
 	var result BetResult
 	err = p.transactor.WithinTransaction(ctx, func(txctx context.Context, unit ports.UnitOfWork) error {
-		var replay bool
-		var lookupErr error
-		transaction, replay, lookupErr = findReplay(txctx, unit.Wagers(), params)
+		replayTransaction, replay, lookupErr := findReplay(txctx, unit.Wagers(), params)
 		if lookupErr != nil {
 			return lookupErr
 		}
 		if replay {
-			result = BetResult{Transaction: transaction, IdempotentReplay: true}
+			transaction = replayTransaction
+			result = BetResult{Transaction: replayTransaction, IdempotentReplay: true}
 			return nil
 		}
 

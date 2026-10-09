@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/junglegaming/backend-challenge-go/internal/application/ports"
 	applicationwager "github.com/junglegaming/backend-challenge-go/internal/application/wager"
 	applicationwallet "github.com/junglegaming/backend-challenge-go/internal/application/wallet"
@@ -279,6 +281,12 @@ func writeBetError(w http.ResponseWriter, err error) {
 		errors.Is(err, domainwager.ErrInvalidKind):
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
 	default:
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) {
+			slog.Error("bet processing failed", "sqlstate", postgresError.Code, "constraint", postgresError.ConstraintName, "message", postgresError.Message)
+		} else {
+			slog.Error("bet processing failed", "error", err.Error())
+		}
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal_error"})
 	}
 }
