@@ -39,6 +39,11 @@ func main() {
 					return time.Now().UTC()
 				})
 			},
+			func(transactor ports.Transactor) (*applicationwager.ProcessLoss, error) {
+				return applicationwager.NewProcessLoss(transactor, uuid.NewString, func() time.Time {
+					return time.Now().UTC()
+				})
+			},
 		),
 	)
 	if err := app.Err(); err != nil {

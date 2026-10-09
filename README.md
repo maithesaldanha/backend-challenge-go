@@ -39,7 +39,7 @@ $bet = @{ externalTransactionId = 'local-bet-001'; playerId = '0192f28f-5dc0-7d5
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/wagering/transactions -Headers @{ Authorization = "Bearer $token"; 'Idempotency-Key' = 'local-provider:local-bet-001' } -ContentType 'application/json' -Body $bet
 ```
 
-O endpoint implementado aceita somente `BET`. Repita a mesma chamada para receber o resultado persistido com `idempotentReplay: true`; reutilizar a chave com conteúdo diferente resulta em `409`. Saldo insuficiente é registrado como rejeição (`422`). O saldo deve ser string decimal com duas casas. Repetir a abertura do mesmo jogador e moeda retorna conflito (`409`). O segredo e as senhas do Compose não devem ser usados fora da máquina local.
+O endpoint aceita `BET` e `LOSS`; omitir `kind` mantém compatibilidade e é interpretado como `BET`. Para `LOSS`, envie `kind = 'LOSS'` e `money.amount = '0.00'`: a transação e o evento de conclusão são registrados, sem alterar saldo, versão da carteira ou ledger. Repita a mesma chamada para receber o resultado persistido com `idempotentReplay: true`; reutilizar a chave com conteúdo diferente resulta em `409`. Saldo insuficiente em `BET` é registrado como rejeição (`422`). O saldo deve ser string decimal com duas casas. Repetir a abertura do mesmo jogador e moeda retorna conflito (`409`). O segredo e as senhas do Compose não devem ser usados fora da máquina local.
 
 Para parar os serviços sem apagar dados:
 

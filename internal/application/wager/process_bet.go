@@ -13,12 +13,12 @@ import (
 )
 
 var (
-	ErrInvalidDependencies = errors.New("invalid process bet dependencies")
+	ErrInvalidDependencies = errors.New("invalid wager processing dependencies")
 	ErrRequestConflict     = errors.New("request conflicts with an existing transaction")
 	ErrWalletOwnership     = errors.New("wallet does not belong to the player")
 )
 
-type BetCommand struct {
+type WagerCommand struct {
 	ProviderID            string
 	ExternalTransactionID string
 	IdempotencyKey        string
@@ -31,10 +31,16 @@ type BetCommand struct {
 	Money                 money.Money
 }
 
-type BetResult struct {
+type BetCommand = WagerCommand
+type LossCommand = WagerCommand
+
+type WagerResult struct {
 	Transaction      domainwager.Transaction
 	IdempotentReplay bool
 }
+
+type BetResult = WagerResult
+type LossResult = WagerResult
 
 type ProcessBet struct {
 	transactor ports.Transactor

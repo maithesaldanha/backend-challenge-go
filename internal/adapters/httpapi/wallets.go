@@ -22,9 +22,10 @@ import (
 )
 
 type Handler struct {
-	openWallet *applicationwallet.OpenWallet
-	processBet *applicationwager.ProcessBet
-	auth       ports.Authenticator
+	openWallet  *applicationwallet.OpenWallet
+	processBet  *applicationwager.ProcessBet
+	processLoss *applicationwager.ProcessLoss
+	auth        ports.Authenticator
 }
 
 type openWalletRequest struct {
@@ -39,7 +40,8 @@ type openWalletResponse struct {
 	Version  int64       `json:"version"`
 }
 
-type betRequest struct {
+type wagerRequest struct {
+	Kind                  string      `json:"kind"`
 	ExternalTransactionID string      `json:"externalTransactionId"`
 	PlayerID              string      `json:"playerId"`
 	WalletID              string      `json:"walletId"`
@@ -48,7 +50,7 @@ type betRequest struct {
 	Money                 money.Money `json:"money"`
 }
 
-type betHashPayload struct {
+type wagerHashPayload struct {
 	ExternalTransactionID string      `json:"externalTransactionId"`
 	GameID                string      `json:"gameId"`
 	Kind                  string      `json:"kind"`
@@ -59,7 +61,7 @@ type betHashPayload struct {
 	WalletID              string      `json:"walletId"`
 }
 
-type betResponse struct {
+type wagerResponse struct {
 	TransactionID    string       `json:"transactionId"`
 	Status           string       `json:"status"`
 	Balance          *money.Money `json:"balance,omitempty"`
@@ -67,17 +69,17 @@ type betResponse struct {
 	IdempotentReplay bool         `json:"idempotentReplay"`
 }
 
-func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, authenticator ports.Authenticator) (*Handler, error) {
-	if openWallet == nil || processBet == nil || authenticator == nil {
-		return nil, errors.New("wallet opener, bet processor, and authenticator are required")
+func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, authenticator ports.Authenticator) (*Handler, error) {
+	if openWallet == nil || processBet == nil || processLoss == nil || authenticator == nil {
+		return nil, errors.New("wallet opener, wager processors, and authenticator are required")
 	}
-	return &Handler{openWallet: openWallet, processBet: processBet, auth: authenticator}, nil
+	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, auth: authenticator}, nil
 }
 
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /wallets", http.HandlerFunc(h.openWalletEndpoint))
-	mux.Handle("POST /wagering/transactions", http.HandlerFunc(h.processBetEndpoint))
+	mux.Handle("POST /wagering/transactions", http.HandlerFunc(h.processWagerEndpoint))
 	return mux
 }
 
@@ -125,7 +127,7 @@ func (h *Handler) openWalletEndpoint(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) processBetEndpoint(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) processWagerEndpoint(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.authorize(w, r, "wager:write")
 	if !ok {
 		return
@@ -147,7 +149,7 @@ func (h *Handler) processBetEndpoint(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	var request betRequest
+	var request wagerRequest
 	if err := decoder.Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
 		return
@@ -165,14 +167,22 @@ func (h *Handler) processBetEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
 		return
 	}
-	payload, err := json.Marshal(betHashPayload{
+	kind := request.Kind
+	if kind == "" {
+		kind = string(domainwager.Bet)
+	}
+	if kind != string(domainwager.Bet) && kind != string(domainwager.Loss) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unsupported_transaction_kind"})
+		return
+	}
+	payload, err := json.Marshal(wagerHashPayload{
 		ProviderID:            principal.ProviderID,
 		ExternalTransactionID: request.ExternalTransactionID,
 		PlayerID:              request.PlayerID,
 		WalletID:              request.WalletID,
 		RoundID:               request.RoundID,
 		GameID:                request.GameID,
-		Kind:                  string(domainwager.Bet),
+		Kind:                  kind,
 		Money:                 request.Money,
 	})
 	if err != nil {
@@ -180,7 +190,7 @@ func (h *Handler) processBetEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := sha256.Sum256(payload)
-	result, err := h.processBet.Execute(r.Context(), applicationwager.BetCommand{
+	command := applicationwager.WagerCommand{
 		ProviderID:            principal.ProviderID,
 		ExternalTransactionID: request.ExternalTransactionID,
 		IdempotencyKey:        idempotencyKey,
@@ -190,12 +200,18 @@ func (h *Handler) processBetEndpoint(w http.ResponseWriter, r *http.Request) {
 		RoundID:               request.RoundID,
 		GameID:                request.GameID,
 		Money:                 request.Money,
-	})
+	}
+	var result applicationwager.WagerResult
+	if kind == string(domainwager.Loss) {
+		result, err = h.processLoss.Execute(r.Context(), command)
+	} else {
+		result, err = h.processBet.Execute(r.Context(), command)
+	}
 	if err != nil {
-		writeBetError(w, err)
+		writeWagerError(w, err)
 		return
 	}
-	response := betResponse{
+	response := wagerResponse{
 		TransactionID:    result.Transaction.ID(),
 		Status:           string(result.Transaction.Status()),
 		FailureCode:      result.Transaction.FailureCode(),
@@ -266,7 +282,7 @@ func writeOpenWalletError(w http.ResponseWriter, err error) {
 	}
 }
 
-func writeBetError(w http.ResponseWriter, err error) {
+func writeWagerError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ports.ErrUnavailable):
 		w.Header().Set("Retry-After", "1")
