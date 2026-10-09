@@ -25,10 +25,17 @@ services:
       KC_HOSTNAME: http://localhost:8081
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
     ports:
       - "8081:8080"
     volumes:
       - ./config/keycloak/backend-realm.json:/opt/keycloak/data/import/backend-realm.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "{ printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
 
   api:
     build: .
@@ -44,7 +51,7 @@ services:
       postgres:
         condition: service_healthy
       keycloak:
-        condition: service_started
+        condition: service_healthy
     restart: on-failure
 
 volumes:
