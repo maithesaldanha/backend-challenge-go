@@ -19,20 +19,22 @@ var (
 )
 
 type WagerCommand struct {
-	ProviderID            string
-	ExternalTransactionID string
-	IdempotencyKey        string
-	PayloadHash           string
-	CorrelationID         string
-	WalletID              string
-	PlayerID              string
-	RoundID               string
-	GameID                string
-	Money                 money.Money
+	ProviderID                     string
+	ExternalTransactionID          string
+	IdempotencyKey                 string
+	PayloadHash                    string
+	CorrelationID                  string
+	WalletID                       string
+	PlayerID                       string
+	RoundID                        string
+	GameID                         string
+	ReferenceExternalTransactionID string
+	Money                          money.Money
 }
 
 type BetCommand = WagerCommand
 type LossCommand = WagerCommand
+type WinCommand = WagerCommand
 
 type WagerResult struct {
 	Transaction      domainwager.Transaction
@@ -41,6 +43,7 @@ type WagerResult struct {
 
 type BetResult = WagerResult
 type LossResult = WagerResult
+type WinResult = WagerResult
 
 type ProcessBet struct {
 	transactor ports.Transactor

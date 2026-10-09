@@ -25,6 +25,7 @@ type Handler struct {
 	openWallet  *applicationwallet.OpenWallet
 	processBet  *applicationwager.ProcessBet
 	processLoss *applicationwager.ProcessLoss
+	processWin  *applicationwager.ProcessWin
 	auth        ports.Authenticator
 }
 
@@ -41,24 +42,26 @@ type openWalletResponse struct {
 }
 
 type wagerRequest struct {
-	Kind                  string      `json:"kind"`
-	ExternalTransactionID string      `json:"externalTransactionId"`
-	PlayerID              string      `json:"playerId"`
-	WalletID              string      `json:"walletId"`
-	RoundID               string      `json:"roundId"`
-	GameID                string      `json:"gameId"`
-	Money                 money.Money `json:"money"`
+	Kind                           string      `json:"kind"`
+	ExternalTransactionID          string      `json:"externalTransactionId"`
+	PlayerID                       string      `json:"playerId"`
+	WalletID                       string      `json:"walletId"`
+	RoundID                        string      `json:"roundId"`
+	GameID                         string      `json:"gameId"`
+	ReferenceExternalTransactionID string      `json:"referenceExternalTransactionId,omitempty"`
+	Money                          money.Money `json:"money"`
 }
 
 type wagerHashPayload struct {
-	ExternalTransactionID string      `json:"externalTransactionId"`
-	GameID                string      `json:"gameId"`
-	Kind                  string      `json:"kind"`
-	Money                 money.Money `json:"money"`
-	PlayerID              string      `json:"playerId"`
-	ProviderID            string      `json:"providerId"`
-	RoundID               string      `json:"roundId"`
-	WalletID              string      `json:"walletId"`
+	ExternalTransactionID          string      `json:"externalTransactionId"`
+	GameID                         string      `json:"gameId"`
+	Kind                           string      `json:"kind"`
+	Money                          money.Money `json:"money"`
+	PlayerID                       string      `json:"playerId"`
+	ProviderID                     string      `json:"providerId"`
+	ReferenceExternalTransactionID string      `json:"referenceExternalTransactionId,omitempty"`
+	RoundID                        string      `json:"roundId"`
+	WalletID                       string      `json:"walletId"`
 }
 
 type wagerResponse struct {
@@ -69,11 +72,11 @@ type wagerResponse struct {
 	IdempotentReplay bool         `json:"idempotentReplay"`
 }
 
-func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, authenticator ports.Authenticator) (*Handler, error) {
-	if openWallet == nil || processBet == nil || processLoss == nil || authenticator == nil {
+func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, authenticator ports.Authenticator) (*Handler, error) {
+	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || authenticator == nil {
 		return nil, errors.New("wallet opener, wager processors, and authenticator are required")
 	}
-	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, auth: authenticator}, nil
+	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, auth: authenticator}, nil
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -171,19 +174,20 @@ func (h *Handler) processWagerEndpoint(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = string(domainwager.Bet)
 	}
-	if kind != string(domainwager.Bet) && kind != string(domainwager.Loss) {
+	if kind != string(domainwager.Bet) && kind != string(domainwager.Loss) && kind != string(domainwager.Win) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unsupported_transaction_kind"})
 		return
 	}
 	payload, err := json.Marshal(wagerHashPayload{
-		ProviderID:            principal.ProviderID,
-		ExternalTransactionID: request.ExternalTransactionID,
-		PlayerID:              request.PlayerID,
-		WalletID:              request.WalletID,
-		RoundID:               request.RoundID,
-		GameID:                request.GameID,
-		Kind:                  kind,
-		Money:                 request.Money,
+		ProviderID:                     principal.ProviderID,
+		ExternalTransactionID:          request.ExternalTransactionID,
+		PlayerID:                       request.PlayerID,
+		WalletID:                       request.WalletID,
+		RoundID:                        request.RoundID,
+		GameID:                         request.GameID,
+		Kind:                           kind,
+		Money:                          request.Money,
+		ReferenceExternalTransactionID: request.ReferenceExternalTransactionID,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
@@ -191,19 +195,22 @@ func (h *Handler) processWagerEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	hash := sha256.Sum256(payload)
 	command := applicationwager.WagerCommand{
-		ProviderID:            principal.ProviderID,
-		ExternalTransactionID: request.ExternalTransactionID,
-		IdempotencyKey:        idempotencyKey,
-		PayloadHash:           hex.EncodeToString(hash[:]),
-		WalletID:              request.WalletID,
-		PlayerID:              request.PlayerID,
-		RoundID:               request.RoundID,
-		GameID:                request.GameID,
-		Money:                 request.Money,
+		ProviderID:                     principal.ProviderID,
+		ExternalTransactionID:          request.ExternalTransactionID,
+		IdempotencyKey:                 idempotencyKey,
+		PayloadHash:                    hex.EncodeToString(hash[:]),
+		WalletID:                       request.WalletID,
+		PlayerID:                       request.PlayerID,
+		RoundID:                        request.RoundID,
+		GameID:                         request.GameID,
+		Money:                          request.Money,
+		ReferenceExternalTransactionID: request.ReferenceExternalTransactionID,
 	}
 	var result applicationwager.WagerResult
 	if kind == string(domainwager.Loss) {
 		result, err = h.processLoss.Execute(r.Context(), command)
+	} else if kind == string(domainwager.Win) {
+		result, err = h.processWin.Execute(r.Context(), command)
 	} else {
 		result, err = h.processBet.Execute(r.Context(), command)
 	}
@@ -223,6 +230,8 @@ func (h *Handler) processWagerEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Transaction.Status() == domainwager.Rejected {
 		status = http.StatusUnprocessableEntity
+	} else if result.Transaction.Status() == domainwager.PendingReference {
+		status = http.StatusAccepted
 	}
 	writeJSON(w, status, response)
 }

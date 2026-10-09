@@ -36,6 +36,14 @@ type WagerTransactionRejectedData struct {
 	FailureCode           string     `json:"failureCode"`
 }
 
+type WagerTransactionPendingReferenceData struct {
+	TransactionID                  string     `json:"transactionId"`
+	ProviderID                     string     `json:"providerId"`
+	ExternalTransactionID          string     `json:"externalTransactionId"`
+	ReferenceExternalTransactionID string     `json:"referenceExternalTransactionId"`
+	Kind                           wager.Kind `json:"kind"`
+}
+
 type WalletBalanceChangedData struct {
 	WalletID      string           `json:"walletId"`
 	TransactionID string           `json:"transactionId"`
@@ -88,6 +96,28 @@ func NewWagerTransactionRejected(id, correlationID string, transaction wager.Tra
 		ID:            id,
 		AggregateID:   transaction.ID(),
 		Type:          "WagerTransactionRejected",
+		CorrelationID: correlationID,
+		OccurredAt:    occurredAt,
+		Version:       1,
+		Payload:       payload,
+	}, nil
+}
+
+func NewWagerTransactionPendingReference(id, correlationID string, transaction wager.Transaction, occurredAt time.Time) (Event, error) {
+	payload, err := json.Marshal(WagerTransactionPendingReferenceData{
+		TransactionID:                  transaction.ID(),
+		ProviderID:                     transaction.ProviderID(),
+		ExternalTransactionID:          transaction.ExternalTransactionID(),
+		ReferenceExternalTransactionID: transaction.ReferenceExternalTransactionID(),
+		Kind:                           transaction.Kind(),
+	})
+	if err != nil {
+		return Event{}, err
+	}
+	return Event{
+		ID:            id,
+		AggregateID:   transaction.ID(),
+		Type:          "WagerTransactionPendingReference",
 		CorrelationID: correlationID,
 		OccurredAt:    occurredAt,
 		Version:       1,
