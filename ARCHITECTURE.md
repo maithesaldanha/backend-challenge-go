@@ -22,6 +22,12 @@ External transaction IDs and idempotency keys are unique per provider. The schem
 
 Inbox rows use `(consumer_name, message_id)` as their key. Inbox completion and the financial result commit together. Outbox rows preserve event identity and payload while delivery attempts, leases, and publication timestamps remain mutable for retries and multiple publishers.
 
+## Authentication and wallet HTTP access
+
+Keycloak issues OAuth 2.0 client-credentials access tokens to service accounts. The API verifies RS256 signatures from the configured JWKS URL and requires the configured issuer, audience, expiration, subject, and authorized party. The verifier reads realm roles from `realm_access.roles` and the optional provider identity from `provider_id`. Configure an audience mapper so the access token contains this service's audience. `POST /wallets` requires the `wallet:write` realm role; provider service accounts must not receive that role. Use HTTPS for Keycloak and JWKS outside the local Docker network.
+
+The API reads `DATABASE_URL`, `KEYCLOAK_ISSUER_URL`, `KEYCLOAK_JWKS_URL`, and `OIDC_AUDIENCE` from the environment. `HTTP_ADDR` defaults to `:8080`. `POST /wallets` accepts a UUID `playerId` and a `Money` object, and returns `201`; malformed input returns `400`, missing or invalid authentication returns `401`, missing `wallet:write` returns `403`, duplicate player/currency wallet returns `409`, and transient database errors return `503`.
+
 ## Reversals
 
 `WIN` may optionally reference a processed `BET`; when it does, the provider, player, wallet, currency, and round must match. The payout amount may differ from the bet.
@@ -32,4 +38,4 @@ A processed bet may have one successful direct reversal: either `REFUND` or `ROL
 
 ## Current implementation boundary
 
-`OpenWallet` and `ProcessBet` use the persistence ports. Wallet opening writes only the wallet for a zero balance; a positive opening also writes the `OPENING` transaction, initial credit ledger entry, and two outbox events in the same transaction. The bet use case checks idempotent replays, locks the wallet row, and commits the wager, balance, ledger, and resulting outbox events together. The SQL adapter implements these ports with one `sql.Tx` per unit of work. The Fx module can provide the database pool and transactor; application entrypoint, configuration loading, other wager kinds, retry workers, event publishing, authentication, HTTP, and SQS remain to be added. The migration has not yet been applied against PostgreSQL in this workspace.
+`OpenWallet` and `ProcessBet` use the persistence ports. Wallet opening writes only the wallet for a zero balance; a positive opening also writes the `OPENING` transaction, initial credit ledger entry, and two outbox events in the same transaction. The bet use case checks idempotent replays, locks the wallet row, and commits the wager, balance, ledger, and resulting outbox events together. The SQL adapter implements these ports with one `sql.Tx` per unit of work. Fx modules provide the database pool, Keycloak authenticator, and HTTP server lifecycle. The wallet opening route requires the `wallet:write` realm role. Application entrypoint and configuration loading, other wager kinds, retry workers, event publishing, provider wagering routes, and SQS remain to be added. The migration has not yet been applied against PostgreSQL in this workspace.

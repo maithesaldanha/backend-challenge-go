@@ -13,6 +13,7 @@ var (
 	ErrNotFound       = errors.New("record not found")
 	ErrConflict       = errors.New("record conflict")
 	ErrOptimisticLock = errors.New("concurrent update detected")
+	ErrUnavailable    = errors.New("persistence unavailable")
 )
 
 type Transactor interface {
