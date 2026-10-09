@@ -103,6 +103,27 @@ func TestReferenceWaitCanResumeProcessing(t *testing.T) {
 	}
 }
 
+func TestWinMayReferenceBetWithoutMatchingBetAmount(t *testing.T) {
+	createdAt := testTime()
+	win, err := NewExternal(newExternalParams(t, Win, "15.00", "bet-external"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := win.MarkProcessed(mustMoney(t, "115.00", "BRL"), createdAt.Add(time.Second)); !errors.Is(err, ErrReferenceRequired) {
+		t.Fatalf("MarkProcessed() error = %v, want %v", err, ErrReferenceRequired)
+	}
+	if err := win.MarkPendingReference(createdAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	bet := newProcessedTransaction(t, Bet, "bet-internal", "bet-external", "25.00", "", "", "75.00")
+	if err := win.ResolveReference(bet, nil, createdAt.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := win.MarkProcessed(mustMoney(t, "115.00", "BRL"), createdAt.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTransactionRejectsInvalidTransitionsAndResults(t *testing.T) {
 	createdAt := testTime()
 	t.Run("non reversal cannot wait for reference", func(t *testing.T) {

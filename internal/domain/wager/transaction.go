@@ -150,7 +150,7 @@ func RehydrateExternal(params ExternalParams, status Status, referenceTransactio
 			return Transaction{}, ErrInvalidStatus
 		}
 	case PendingReference:
-		if (params.Kind != Refund && params.Kind != Rollback) || referenceTransactionID != "" || failureCode != "" || hasResultBalance {
+		if !canWaitForReference(params.Kind, params.ReferenceExternalTransactionID) || referenceTransactionID != "" || failureCode != "" || hasResultBalance {
 			return Transaction{}, ErrInvalidStatus
 		}
 	case Processed:
@@ -171,6 +171,9 @@ func RehydrateExternal(params ExternalParams, status Status, referenceTransactio
 			return Transaction{}, balanceErr
 		}
 		if (params.Kind == Refund || params.Kind == Rollback) && referenceTransactionID == "" {
+			return Transaction{}, ErrReferenceRequired
+		}
+		if params.Kind == Win && params.ReferenceExternalTransactionID != "" && referenceTransactionID == "" {
 			return Transaction{}, ErrReferenceRequired
 		}
 	case Rejected, Failed:
@@ -230,7 +233,7 @@ func (t *Transaction) MarkPendingReference(now time.Time) error {
 	if err := t.canTransition(now); err != nil {
 		return err
 	}
-	if t.status != Pending || (t.kind != Refund && t.kind != Rollback) || t.referenceTransactionID != "" {
+	if t.status != Pending || !canWaitForReference(t.kind, t.referenceExternalID) || t.referenceTransactionID != "" {
 		return ErrInvalidTransition
 	}
 	t.status = PendingReference
@@ -271,7 +274,7 @@ func (t *Transaction) MarkProcessed(balance money.Money, now time.Time) error {
 	if _, err := t.money.Compare(balance); err != nil {
 		return err
 	}
-	if (t.kind == Refund || t.kind == Rollback) && t.referenceTransactionID == "" {
+	if (t.kind == Refund || t.kind == Rollback || t.kind == Win && t.referenceExternalID != "") && t.referenceTransactionID == "" {
 		return ErrReferenceRequired
 	}
 	t.status = Processed
@@ -338,7 +341,7 @@ func (t Transaction) ResultBalance() (money.Money, bool) {
 }
 
 func (t Transaction) ValidateReference(reference Transaction, processedReversals []Transaction) error {
-	if t.kind != Refund && t.kind != Rollback {
+	if t.kind != Win && t.kind != Refund && t.kind != Rollback {
 		return ErrInvalidKind
 	}
 	if t.status != Pending && t.status != PendingReference {
@@ -353,12 +356,18 @@ func (t Transaction) ValidateReference(reference Transaction, processedReversals
 		t.referenceTransactionID != "" && t.referenceTransactionID != reference.id {
 		return ErrReferenceMismatch
 	}
-	if t.kind == Refund && reference.kind != Bet ||
+	if t.kind == Win && reference.kind != Bet ||
+		t.kind == Refund && reference.kind != Bet ||
 		t.kind == Rollback && reference.kind != Bet && reference.kind != Win && reference.kind != Refund {
 		return ErrInvalidReferenceKind
 	}
-	if comparison, err := t.money.Compare(reference.money); err != nil || comparison != 0 {
-		return ErrReferenceMismatch
+	if t.kind == Refund || t.kind == Rollback {
+		if comparison, err := t.money.Compare(reference.money); err != nil || comparison != 0 {
+			return ErrReferenceMismatch
+		}
+	}
+	if t.kind == Win {
+		return nil
 	}
 	for _, reversal := range processedReversals {
 		if reversal.status != Processed || reversal.referenceTransactionID != reference.id ||
@@ -373,6 +382,10 @@ func (t Transaction) ValidateReference(reference Transaction, processedReversals
 		}
 	}
 	return nil
+}
+
+func canWaitForReference(kind Kind, externalReferenceID string) bool {
+	return kind == Refund || kind == Rollback || kind == Win && externalReferenceID != ""
 }
 
 func validateAmount(kind Kind, amount money.Money) error {

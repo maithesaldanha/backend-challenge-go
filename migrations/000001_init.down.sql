@@ -1,0 +1,15 @@
+DROP TRIGGER IF EXISTS outbox_events_immutable_payload ON outbox_events;
+DROP FUNCTION IF EXISTS prevent_outbox_payload_mutation();
+DROP TRIGGER IF EXISTS consumer_inbox_protect_identity ON consumer_inbox;
+DROP FUNCTION IF EXISTS protect_inbox_identity();
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS consumer_inbox;
+DROP TRIGGER IF EXISTS wallets_protect_identity_and_version ON wallets;
+DROP FUNCTION IF EXISTS protect_wallet_identity_and_version();
+DROP TRIGGER IF EXISTS wager_transactions_protect_identity ON wager_transactions;
+DROP FUNCTION IF EXISTS protect_wager_transaction_identity();
+DROP TRIGGER IF EXISTS wallet_ledger_no_update_or_delete ON wallet_ledger_entries;
+DROP FUNCTION IF EXISTS prevent_wallet_ledger_mutation();
+DROP TABLE IF EXISTS wallet_ledger_entries;
+DROP TABLE IF EXISTS wager_transactions;
+DROP TABLE IF EXISTS wallets;
