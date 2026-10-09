@@ -129,6 +129,45 @@ func NewOpeningEntry(ledgerID, walletID, transactionID string, amount money.Mone
 	}, nil
 }
 
+func RehydrateLedgerEntry(id, walletID, transactionID string, direction Direction, amount, before, after money.Money, createdAt time.Time) (LedgerEntry, error) {
+	if id == "" || walletID == "" || transactionID == "" || (direction != Debit && direction != Credit) {
+		return LedgerEntry{}, ErrInvalidIdentity
+	}
+	if createdAt.IsZero() || createdAt.Location() != time.UTC {
+		return LedgerEntry{}, ErrInvalidTimestamp
+	}
+	minor, err := amount.AmountMinor()
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	if minor <= 0 {
+		return LedgerEntry{}, ErrInvalidMovement
+	}
+	beforeMinor, err := before.AmountMinor()
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	afterMinor, err := after.AmountMinor()
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	if beforeMinor < 0 || afterMinor < 0 {
+		return LedgerEntry{}, ErrNegativeBalance
+	}
+	expected, err := before.Add(amount)
+	if direction == Debit {
+		expected, err = before.Subtract(amount)
+	}
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	comparison, err := expected.Compare(after)
+	if err != nil || comparison != 0 {
+		return LedgerEntry{}, ErrInvalidMovement
+	}
+	return LedgerEntry{id: id, walletID: walletID, transactionID: transactionID, direction: direction, money: amount, balanceBefore: before, balanceAfter: after, createdAt: createdAt}, nil
+}
+
 func (w *Wallet) Debit(ledgerID, transactionID string, amount money.Money, now time.Time) (LedgerEntry, error) {
 	return w.move(ledgerID, transactionID, amount, now, Debit)
 }

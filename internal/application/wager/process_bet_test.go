@@ -153,6 +153,10 @@ func (u *memoryUnit) Outbox() ports.OutboxRepository  { return u.outbox }
 
 type memoryWallets struct{ account domainwallet.Wallet }
 
+func (r *memoryWallets) Get(ctx context.Context, id string) (domainwallet.Wallet, error) {
+	return r.GetForUpdate(ctx, id)
+}
+
 func (r *memoryWallets) GetForUpdate(_ context.Context, id string) (domainwallet.Wallet, error) {
 	if id != r.account.ID() {
 		return domainwallet.Wallet{}, ports.ErrNotFound
@@ -292,6 +296,16 @@ type memoryLedger struct{ entries []domainwallet.LedgerEntry }
 func (r *memoryLedger) Append(_ context.Context, entry domainwallet.LedgerEntry) error {
 	r.entries = append(r.entries, entry)
 	return nil
+}
+
+func (r *memoryLedger) ListByWallet(_ context.Context, walletID string, cursor *ports.LedgerCursor, limit int) ([]domainwallet.LedgerEntry, error) {
+	entries := make([]domainwallet.LedgerEntry, 0, limit)
+	for i := len(r.entries) - 1; i >= 0 && len(entries) < limit; i-- {
+		if r.entries[i].WalletID() == walletID && (cursor == nil || r.entries[i].CreatedAt().Before(cursor.CreatedAt) || r.entries[i].CreatedAt().Equal(cursor.CreatedAt) && r.entries[i].ID() < cursor.ID) {
+			entries = append(entries, r.entries[i])
+		}
+	}
+	return entries, nil
 }
 
 type memoryOutbox struct{ events []events.Event }

@@ -29,6 +29,7 @@ type UnitOfWork interface {
 }
 
 type WalletRepository interface {
+	Get(context.Context, string) (wallet.Wallet, error)
 	GetForUpdate(context.Context, string) (wallet.Wallet, error)
 	Create(context.Context, wallet.Wallet) error
 	Save(context.Context, wallet.Wallet, int64) error
@@ -49,6 +50,12 @@ type WagerRepository interface {
 
 type LedgerRepository interface {
 	Append(context.Context, wallet.LedgerEntry) error
+	ListByWallet(context.Context, string, *LedgerCursor, int) ([]wallet.LedgerEntry, error)
+}
+
+type LedgerCursor struct {
+	CreatedAt time.Time
+	ID        string
 }
 
 type OutboxRepository interface {

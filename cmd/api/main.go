@@ -35,6 +35,12 @@ func main() {
 					return time.Now().UTC()
 				})
 			},
+			func(transactor ports.Transactor) (*applicationwallet.ReadWallet, error) {
+				return applicationwallet.NewReadWallet(transactor)
+			},
+			func(transactor ports.Transactor) (*applicationwallet.ReadWalletLedger, error) {
+				return applicationwallet.NewReadWalletLedger(transactor)
+			},
 			func(transactor ports.Transactor) (*applicationwager.ProcessBet, error) {
 				return applicationwager.NewProcessBet(transactor, uuid.NewString, func() time.Time {
 					return time.Now().UTC()
@@ -54,6 +60,9 @@ func main() {
 				return applicationwager.NewProcessReversal(transactor, uuid.NewString, func() time.Time {
 					return time.Now().UTC()
 				})
+			},
+			func(transactor ports.Transactor) (*applicationwager.ReadTransaction, error) {
+				return applicationwager.NewReadTransaction(transactor)
 			},
 			func(transactor ports.Transactor) (*applicationwager.RetryPendingReferences, error) {
 				return applicationwager.NewRetryPendingReferences(transactor, uuid.NewString, func() time.Time {

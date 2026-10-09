@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -9,7 +10,9 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -27,7 +30,58 @@ type Handler struct {
 	processLoss     *applicationwager.ProcessLoss
 	processWin      *applicationwager.ProcessWin
 	processReversal *applicationwager.ProcessReversal
+	readWallet      *applicationwallet.ReadWallet
+	readLedger      *applicationwallet.ReadWalletLedger
+	readTransaction *applicationwager.ReadTransaction
 	auth            ports.Authenticator
+}
+
+type ledgerCursorPayload struct {
+	CreatedAt time.Time `json:"createdAt"`
+	ID        string    `json:"id"`
+}
+
+type ledgerEntryResponse struct {
+	ID            string      `json:"id"`
+	TransactionID string      `json:"transactionId"`
+	Direction     string      `json:"direction"`
+	Amount        money.Money `json:"amount"`
+	BalanceBefore money.Money `json:"balanceBefore"`
+	BalanceAfter  money.Money `json:"balanceAfter"`
+	CreatedAt     time.Time   `json:"createdAt"`
+}
+
+type ledgerResponse struct {
+	Entries    []ledgerEntryResponse `json:"entries"`
+	NextCursor string                `json:"nextCursor,omitempty"`
+}
+
+type walletReadResponse struct {
+	ID        string      `json:"id"`
+	PlayerID  string      `json:"playerId"`
+	Balance   money.Money `json:"balance"`
+	Version   int64       `json:"version"`
+	CreatedAt time.Time   `json:"createdAt"`
+	UpdatedAt time.Time   `json:"updatedAt"`
+}
+
+type transactionReadResponse struct {
+	TransactionID                  string       `json:"transactionId"`
+	ProviderID                     string       `json:"providerId,omitempty"`
+	ExternalTransactionID          string       `json:"externalTransactionId,omitempty"`
+	WalletID                       string       `json:"walletId"`
+	PlayerID                       string       `json:"playerId"`
+	RoundID                        string       `json:"roundId,omitempty"`
+	GameID                         string       `json:"gameId,omitempty"`
+	Kind                           string       `json:"kind"`
+	Money                          money.Money  `json:"money"`
+	ReferenceExternalTransactionID string       `json:"referenceExternalTransactionId,omitempty"`
+	ReferenceTransactionID         string       `json:"referenceTransactionId,omitempty"`
+	Status                         string       `json:"status"`
+	FailureCode                    string       `json:"failureCode,omitempty"`
+	ResultBalance                  *money.Money `json:"resultBalance,omitempty"`
+	CreatedAt                      time.Time    `json:"createdAt"`
+	UpdatedAt                      time.Time    `json:"updatedAt"`
 }
 
 type openWalletRequest struct {
@@ -73,18 +127,149 @@ type wagerResponse struct {
 	IdempotentReplay bool         `json:"idempotentReplay"`
 }
 
-func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal, authenticator ports.Authenticator) (*Handler, error) {
-	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || processReversal == nil || authenticator == nil {
-		return nil, errors.New("wallet opener, wager processors, and authenticator are required")
+func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal, readWallet *applicationwallet.ReadWallet, readLedger *applicationwallet.ReadWalletLedger, readTransaction *applicationwager.ReadTransaction, authenticator ports.Authenticator) (*Handler, error) {
+	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || processReversal == nil || readWallet == nil || readLedger == nil || readTransaction == nil || authenticator == nil {
+		return nil, errors.New("wallet and wager use cases and authenticator are required")
 	}
-	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, processReversal: processReversal, auth: authenticator}, nil
+	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, processReversal: processReversal, readWallet: readWallet, readLedger: readLedger, readTransaction: readTransaction, auth: authenticator}, nil
 }
 
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /wallets", http.HandlerFunc(h.openWalletEndpoint))
+	mux.Handle("GET /wallets/{walletID}", http.HandlerFunc(h.readWalletEndpoint))
+	mux.Handle("GET /wallets/{walletID}/ledger", http.HandlerFunc(h.readLedgerEndpoint))
 	mux.Handle("POST /wagering/transactions", http.HandlerFunc(h.processWagerEndpoint))
+	mux.Handle("GET /wagering/transactions/{transactionID}", http.HandlerFunc(h.readTransactionEndpoint))
+	mux.Handle("GET /providers/{providerID}/wagering/transactions/{externalTransactionID}", http.HandlerFunc(h.readProviderTransactionEndpoint))
 	return mux
+}
+
+func (h *Handler) readWalletEndpoint(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorize(w, r, "wallet:write"); !ok {
+		return
+	}
+	id := r.PathValue("walletID")
+	if _, err := uuid.Parse(id); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
+		return
+	}
+	account, err := h.readWallet.Execute(r.Context(), id)
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, walletReadResponse{ID: account.ID(), PlayerID: account.PlayerID(), Balance: account.Balance(), Version: account.Version(), CreatedAt: account.CreatedAt(), UpdatedAt: account.UpdatedAt()})
+}
+
+func (h *Handler) readLedgerEndpoint(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorize(w, r, "wallet:write"); !ok {
+		return
+	}
+	walletID := r.PathValue("walletID")
+	if _, err := uuid.Parse(walletID); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_limit"})
+			return
+		}
+		limit = parsed
+	}
+	var cursor *ports.LedgerCursor
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		var payload ledgerCursorPayload
+		if err != nil || json.Unmarshal(decoded, &payload) != nil || payload.CreatedAt.IsZero() || strings.TrimSpace(payload.ID) == "" {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_cursor"})
+			return
+		}
+		if _, err := uuid.Parse(payload.ID); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_cursor"})
+			return
+		}
+		cursor = &ports.LedgerCursor{CreatedAt: payload.CreatedAt.UTC(), ID: payload.ID}
+	}
+	page, err := h.readLedger.Execute(r.Context(), walletID, cursor, limit)
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
+	response := ledgerResponse{Entries: make([]ledgerEntryResponse, 0, len(page.Entries))}
+	for _, entry := range page.Entries {
+		response.Entries = append(response.Entries, ledgerEntryResponse{ID: entry.ID(), TransactionID: entry.TransactionID(), Direction: string(entry.Direction()), Amount: entry.Money(), BalanceBefore: entry.BalanceBefore(), BalanceAfter: entry.BalanceAfter(), CreatedAt: entry.CreatedAt()})
+	}
+	if page.HasMore && len(page.Entries) > 0 {
+		last := page.Entries[len(page.Entries)-1]
+		encoded, _ := json.Marshal(ledgerCursorPayload{CreatedAt: last.CreatedAt(), ID: last.ID()})
+		response.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) readTransactionEndpoint(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorize(w, r, "wallet:write"); !ok {
+		return
+	}
+	id := r.PathValue("transactionID")
+	if _, err := uuid.Parse(id); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
+		return
+	}
+	transaction, err := h.readTransaction.ByID(r.Context(), id)
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toTransactionReadResponse(transaction))
+}
+
+func (h *Handler) readProviderTransactionEndpoint(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.authorize(w, r, "wager:write")
+	if !ok {
+		return
+	}
+	providerID := r.PathValue("providerID")
+	if strings.TrimSpace(principal.ProviderID) == "" || principal.ProviderID != providerID {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "transaction_not_found"})
+		return
+	}
+	externalID := r.PathValue("externalTransactionID")
+	if strings.TrimSpace(externalID) == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
+		return
+	}
+	transaction, err := h.readTransaction.ByProviderExternalID(r.Context(), providerID, externalID)
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toTransactionReadResponse(transaction))
+}
+
+func toTransactionReadResponse(transaction domainwager.Transaction) transactionReadResponse {
+	response := transactionReadResponse{TransactionID: transaction.ID(), ProviderID: transaction.ProviderID(), ExternalTransactionID: transaction.ExternalTransactionID(), WalletID: transaction.WalletID(), PlayerID: transaction.PlayerID(), RoundID: transaction.RoundID(), GameID: transaction.GameID(), Kind: string(transaction.Kind()), Money: transaction.Money(), ReferenceExternalTransactionID: transaction.ReferenceExternalTransactionID(), ReferenceTransactionID: transaction.ReferenceTransactionID(), Status: string(transaction.Status()), FailureCode: transaction.FailureCode(), CreatedAt: transaction.CreatedAt(), UpdatedAt: transaction.UpdatedAt()}
+	if balance, ok := transaction.ResultBalance(); ok {
+		response.ResultBalance = &balance
+	}
+	return response
+}
+
+func writeReadError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ports.ErrNotFound):
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+	case errors.Is(err, ports.ErrUnavailable):
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "temporarily_unavailable"})
+	default:
+		slog.Error("read request failed", "error", err.Error())
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal_error"})
+	}
 }
 
 func (h *Handler) openWalletEndpoint(w http.ResponseWriter, r *http.Request) {

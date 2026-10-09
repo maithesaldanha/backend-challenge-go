@@ -2,7 +2,7 @@
 
 ## Estado atual
 
-O repositório está em implementação incremental. Neste momento, estão disponíveis o domínio básico, persistência PostgreSQL, abertura de carteira e o primeiro fluxo HTTP de aposta (`BET`), ambos protegidos por Keycloak. Consumidor SQS, outras operações de aposta, workers de inbox/outbox, health checks e testes abrangentes ainda não estão implementados.
+O repositório está em implementação incremental. Estão disponíveis a abertura e leitura de carteiras, leitura paginada do ledger, processamento e consulta de transações (`BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK`), persistência PostgreSQL e autenticação Keycloak. Consumidor SQS, publicação da outbox, health checks e testes abrangentes ainda não estão implementados.
 
 ## Executar localmente com Docker Compose
 
@@ -55,12 +55,21 @@ docker compose down -v
 
 ## Migrations
 
-No ambiente Compose, a migration inicial roda automaticamente somente na criação de um volume vazio. Em um banco vazio fora desse fluxo, aplique a migration inicial; a reversão remove as tabelas e os dados do desafio:
+No ambiente Compose, a migration inicial roda automaticamente somente na criação de um volume vazio. Para atualizar um volume existente, aplique a migration nova na ordem indicada. Para um banco vazio, aplique primeiro a migration inicial. A migration inicial de reversão remove as tabelas e os dados do desafio:
 
 ```powershell
 Get-Content migrations/000001_init.up.sql | docker compose exec -T postgres psql -U backend -d backend
 Get-Content migrations/000001_init.down.sql | docker compose exec -T postgres psql -U backend -d backend
 ```
+
+Para aplicar ou reverter o índice de leitura do ledger:
+
+```powershell
+Get-Content migrations/000002_wallet_ledger_read_index.up.sql | docker compose exec -T postgres psql -U backend -d backend
+Get-Content migrations/000002_wallet_ledger_read_index.down.sql | docker compose exec -T postgres psql -U backend -d backend
+```
+
+Os endpoints `GET /wallets/{walletId}` e `GET /wallets/{walletId}/ledger` exigem `wallet:write`. O ledger aceita `limit` entre 1 e 100 (padrão 50) e devolve `nextCursor` opaco quando há outra página. Use o cursor como recebido, sem decodificá-lo. `GET /wagering/transactions/{transactionId}` também exige acesso interno `wallet:write`. Para consulta por identidade externa, use `GET /providers/{providerId}/wagering/transactions/{externalTransactionId}` com `wager:write`; o `providerId` deve corresponder ao claim do token. As respostas de transação incluem estado e código de falha, quando disponíveis, sem expor a chave de idempotência nem o hash interno do payload.
 
 ## Verificações disponíveis
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,14 +38,25 @@ func (u *unitOfWork) Outbox() ports.OutboxRepository  { return u.outbox }
 
 type walletRepository struct{ tx *sql.Tx }
 
+func (r walletRepository) Get(ctx context.Context, id string) (wallet.Wallet, error) {
+	return r.get(ctx, id, false)
+}
+
 func (r walletRepository) GetForUpdate(ctx context.Context, id string) (wallet.Wallet, error) {
+	return r.get(ctx, id, true)
+}
+
+func (r walletRepository) get(ctx context.Context, id string, lock bool) (wallet.Wallet, error) {
 	var playerID, currency string
 	var balance, version int64
 	var createdAt, updatedAt time.Time
-	err := r.tx.QueryRowContext(ctx, `
+	query := `
 		SELECT player_id::text, currency, balance_minor, version, created_at, updated_at
-		FROM wallets WHERE id = $1 FOR UPDATE`, id,
-	).Scan(&playerID, &currency, &balance, &version, &createdAt, &updatedAt)
+		FROM wallets WHERE id = $1`
+	if lock {
+		query += ` FOR UPDATE`
+	}
+	err := r.tx.QueryRowContext(ctx, query, id).Scan(&playerID, &currency, &balance, &version, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return wallet.Wallet{}, ports.ErrNotFound
 	}
@@ -341,6 +353,54 @@ func (r wagerRepository) write(ctx context.Context, transaction wager.Transactio
 }
 
 type ledgerRepository struct{ tx *sql.Tx }
+
+func (r ledgerRepository) ListByWallet(ctx context.Context, walletID string, cursor *ports.LedgerCursor, limit int) ([]wallet.LedgerEntry, error) {
+	query := `SELECT id::text, wallet_id::text, transaction_id::text, direction, amount_minor, currency,
+		balance_before_minor, balance_after_minor, created_at
+		FROM wallet_ledger_entries WHERE wallet_id = $1`
+	args := []any{walletID}
+	if cursor != nil {
+		query += ` AND (created_at, id) < ($2, $3)`
+		args = append(args, cursor.CreatedAt, cursor.ID)
+	}
+	query += ` ORDER BY created_at DESC, id DESC LIMIT $` + strconv.Itoa(len(args)+1)
+	args = append(args, limit)
+	rows, err := r.tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	entries := make([]wallet.LedgerEntry, 0, limit)
+	for rows.Next() {
+		var id, rowWalletID, transactionID, direction, currency string
+		var amountMinor, beforeMinor, afterMinor int64
+		var createdAt time.Time
+		if err := rows.Scan(&id, &rowWalletID, &transactionID, &direction, &amountMinor, &currency, &beforeMinor, &afterMinor, &createdAt); err != nil {
+			return nil, mapError(err)
+		}
+		amount, err := money.FromMinorUnits(amountMinor, strings.TrimSpace(currency))
+		if err != nil {
+			return nil, err
+		}
+		before, err := money.FromMinorUnits(beforeMinor, strings.TrimSpace(currency))
+		if err != nil {
+			return nil, err
+		}
+		after, err := money.FromMinorUnits(afterMinor, strings.TrimSpace(currency))
+		if err != nil {
+			return nil, err
+		}
+		entry, err := wallet.RehydrateLedgerEntry(id, rowWalletID, transactionID, wallet.Direction(direction), amount, before, after, createdAt.UTC())
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	return entries, nil
+}
 
 func (r ledgerRepository) Append(ctx context.Context, entry wallet.LedgerEntry) error {
 	amount, err := entry.Money().AmountMinor()
