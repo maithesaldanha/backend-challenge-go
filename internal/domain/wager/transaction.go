@@ -9,15 +9,20 @@ import (
 )
 
 var (
-	ErrInvalidTransaction = errors.New("invalid wager transaction")
-	ErrInvalidKind        = errors.New("invalid wager kind")
-	ErrInvalidStatus      = errors.New("invalid transaction status")
-	ErrInvalidTransition  = errors.New("invalid transaction state transition")
-	ErrInvalidFailureCode = errors.New("invalid failure code")
-	ErrTerminalState      = errors.New("transaction is terminal")
-	ErrReferenceRequired  = errors.New("reference transaction is required")
-	ErrResultRequired     = errors.New("result balance is required")
-	ErrNegativeResult     = errors.New("result balance cannot be negative")
+	ErrInvalidTransaction    = errors.New("invalid wager transaction")
+	ErrInvalidKind           = errors.New("invalid wager kind")
+	ErrInvalidStatus         = errors.New("invalid transaction status")
+	ErrInvalidTransition     = errors.New("invalid transaction state transition")
+	ErrInvalidFailureCode    = errors.New("invalid failure code")
+	ErrTerminalState         = errors.New("transaction is terminal")
+	ErrReferenceRequired     = errors.New("reference transaction is required")
+	ErrReferenceMismatch     = errors.New("reference transaction does not match")
+	ErrReferenceNotProcessed = errors.New("reference transaction is not processed")
+	ErrInvalidReferenceKind  = errors.New("transaction kind cannot be referenced")
+	ErrDuplicateReversal     = errors.New("reversal of this type already succeeded")
+	ErrConflictingReversal   = errors.New("bet already has a successful reversal")
+	ErrResultRequired        = errors.New("result balance is required")
+	ErrNegativeResult        = errors.New("result balance cannot be negative")
 )
 
 type Kind string
@@ -125,6 +130,17 @@ func RehydrateExternal(params ExternalParams, status Status, referenceTransactio
 	if !validUTC(updatedAt) || updatedAt.Before(params.CreatedAt) {
 		return Transaction{}, ErrInvalidTransaction
 	}
+	if !hasResultBalance {
+		if _, balanceErr := resultBalance.AmountMinor(); balanceErr == nil {
+			return Transaction{}, ErrInvalidStatus
+		}
+	}
+	if referenceTransactionID != "" && strings.TrimSpace(referenceTransactionID) == "" {
+		return Transaction{}, ErrInvalidTransaction
+	}
+	if referenceTransactionID != "" && params.ReferenceExternalTransactionID == "" {
+		return Transaction{}, ErrInvalidTransaction
+	}
 	if referenceTransactionID != "" && (params.Kind != Win && params.Kind != Refund && params.Kind != Rollback) {
 		return Transaction{}, ErrInvalidTransaction
 	}
@@ -198,6 +214,18 @@ func NewOpening(id, walletID, playerID string, amount money.Money, now time.Time
 	}, nil
 }
 
+func RehydrateOpening(id, walletID, playerID string, amount money.Money, createdAt, updatedAt time.Time) (Transaction, error) {
+	transaction, err := NewOpening(id, walletID, playerID, amount, createdAt)
+	if err != nil {
+		return Transaction{}, err
+	}
+	if !validUTC(updatedAt) || updatedAt.Before(createdAt) {
+		return Transaction{}, ErrInvalidTransaction
+	}
+	transaction.updatedAt = updatedAt
+	return transaction, nil
+}
+
 func (t *Transaction) MarkPendingReference(now time.Time) error {
 	if err := t.canTransition(now); err != nil {
 		return err
@@ -210,14 +238,17 @@ func (t *Transaction) MarkPendingReference(now time.Time) error {
 	return nil
 }
 
-func (t *Transaction) ResolveReference(referenceTransactionID string, now time.Time) error {
+func (t *Transaction) ResolveReference(reference Transaction, processedReversals []Transaction, now time.Time) error {
 	if err := t.canTransition(now); err != nil {
 		return err
 	}
-	if t.status != PendingReference || strings.TrimSpace(referenceTransactionID) == "" {
+	if t.status != PendingReference && t.status != Pending {
 		return ErrInvalidTransition
 	}
-	t.referenceTransactionID = referenceTransactionID
+	if err := t.ValidateReference(reference, processedReversals); err != nil {
+		return err
+	}
+	t.referenceTransactionID = reference.id
 	t.status = Pending
 	t.updatedAt = now
 	return nil
@@ -304,6 +335,44 @@ func (t Transaction) UpdatedAt() time.Time                   { return t.updatedA
 
 func (t Transaction) ResultBalance() (money.Money, bool) {
 	return t.resultBalance, t.hasResultBalance
+}
+
+func (t Transaction) ValidateReference(reference Transaction, processedReversals []Transaction) error {
+	if t.kind != Refund && t.kind != Rollback {
+		return ErrInvalidKind
+	}
+	if t.status != Pending && t.status != PendingReference {
+		return ErrInvalidTransition
+	}
+	if reference.status != Processed {
+		return ErrReferenceNotProcessed
+	}
+	if reference.id == "" || t.providerID != reference.providerID ||
+		t.referenceExternalID == "" || t.referenceExternalID != reference.externalTransactionID ||
+		t.walletID != reference.walletID || t.playerID != reference.playerID || t.roundID != reference.roundID ||
+		t.referenceTransactionID != "" && t.referenceTransactionID != reference.id {
+		return ErrReferenceMismatch
+	}
+	if t.kind == Refund && reference.kind != Bet ||
+		t.kind == Rollback && reference.kind != Bet && reference.kind != Win && reference.kind != Refund {
+		return ErrInvalidReferenceKind
+	}
+	if comparison, err := t.money.Compare(reference.money); err != nil || comparison != 0 {
+		return ErrReferenceMismatch
+	}
+	for _, reversal := range processedReversals {
+		if reversal.status != Processed || reversal.referenceTransactionID != reference.id ||
+			(reversal.kind != Refund && reversal.kind != Rollback) {
+			continue
+		}
+		if reversal.kind == t.kind {
+			return ErrDuplicateReversal
+		}
+		if reference.kind == Bet && (reversal.kind == Refund || reversal.kind == Rollback) {
+			return ErrConflictingReversal
+		}
+	}
+	return nil
 }
 
 func validateAmount(kind Kind, amount money.Money) error {

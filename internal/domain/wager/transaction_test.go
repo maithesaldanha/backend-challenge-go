@@ -73,6 +73,7 @@ func TestTransactionTransitionsAndTerminalState(t *testing.T) {
 
 func TestReferenceWaitCanResumeProcessing(t *testing.T) {
 	createdAt := testTime()
+	bet := newProcessedTransaction(t, Bet, "transaction-1", "bet-external-1", "10.00", "", "", "90.00")
 	transaction, err := NewExternal(newExternalParams(t, Refund, "10.00", "bet-external-1"))
 	if err != nil {
 		t.Fatal(err)
@@ -83,13 +84,21 @@ func TestReferenceWaitCanResumeProcessing(t *testing.T) {
 	if transaction.Status() != PendingReference {
 		t.Fatalf("status = %s, want %s", transaction.Status(), PendingReference)
 	}
-	if err := transaction.ResolveReference("transaction-1", createdAt.Add(2*time.Second)); err != nil {
+	wrongBet := newProcessedTransaction(t, Bet, "wrong-bet", "bet-external-1", "10.00", "", "", "90.00")
+	wrongBet.playerID = "different-player"
+	if err := transaction.ResolveReference(wrongBet, nil, createdAt.Add(2*time.Second)); !errors.Is(err, ErrReferenceMismatch) {
+		t.Fatalf("ResolveReference() error = %v, want %v", err, ErrReferenceMismatch)
+	}
+	if transaction.Status() != PendingReference {
+		t.Fatal("failed reference resolution must preserve the pending reference state")
+	}
+	if err := transaction.ResolveReference(bet, nil, createdAt.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if transaction.Status() != Pending || transaction.ReferenceTransactionID() != "transaction-1" {
 		t.Fatalf("resolved transaction has status %s and reference %q", transaction.Status(), transaction.ReferenceTransactionID())
 	}
-	if err := transaction.MarkProcessed(mustMoney(t, "110.00", "BRL"), createdAt.Add(3*time.Second)); err != nil {
+	if err := transaction.MarkProcessed(mustMoney(t, "110.00", "BRL"), createdAt.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -143,25 +152,140 @@ func TestRehydrateExternalDoesNotReplayTransitions(t *testing.T) {
 	if !errors.Is(err, ErrResultRequired) {
 		t.Fatalf("RehydrateExternal() error = %v, want %v", err, ErrResultRequired)
 	}
+
+	_, err = RehydrateExternal(params, Pending, "", "", mustMoney(t, "90.00", "BRL"), false, updatedAt)
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("RehydrateExternal() error = %v, want %v", err, ErrInvalidStatus)
+	}
+
+	winParams := newExternalParams(t, Win, "10.00", "")
+	_, err = RehydrateExternal(winParams, Pending, "unexpected-reference", "", money.Money{}, false, updatedAt)
+	if !errors.Is(err, ErrInvalidTransaction) {
+		t.Fatalf("RehydrateExternal() error = %v, want %v", err, ErrInvalidTransaction)
+	}
+}
+
+func TestRehydrateOpeningKeepsInternalProcessedState(t *testing.T) {
+	createdAt := testTime()
+	updatedAt := createdAt.Add(time.Minute)
+	transaction, err := RehydrateOpening("opening-id", "wallet-id", "player-id", mustMoney(t, "100.00", "BRL"), createdAt, updatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transaction.Kind() != Opening || transaction.Status() != Processed || !transaction.UpdatedAt().Equal(updatedAt) {
+		t.Fatalf("rehydrated opening has kind %s, status %s and updatedAt %s", transaction.Kind(), transaction.Status(), transaction.UpdatedAt())
+	}
+}
+
+func TestValidateReferenceRequiresMatchingProcessedOperation(t *testing.T) {
+	bet := newProcessedTransaction(t, Bet, "bet-internal", "bet-external", "25.00", "", "", "75.00")
+	refund := newPendingTransaction(t, Refund, "refund-internal", "refund-external", "provider-a", "player-id", "wallet-id", "round-id", "25.00", "bet-external")
+
+	if err := refund.ValidateReference(bet, nil); err != nil {
+		t.Fatalf("ValidateReference() error = %v", err)
+	}
+
+	unprocessedBet, err := NewExternal(newExternalWithIDs(t, Bet, "pending-bet", "pending-bet-external", "provider-a", "player-id", "wallet-id", "round-id", "25.00", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := refund.ValidateReference(unprocessedBet, nil); !errors.Is(err, ErrReferenceNotProcessed) {
+		t.Fatalf("ValidateReference() error = %v, want %v", err, ErrReferenceNotProcessed)
+	}
+
+	wrongPlayer := newProcessedTransaction(t, Bet, "other-bet", "bet-external", "25.00", "", "", "75.00")
+	wrongPlayer.playerID = "other-player"
+	if err := refund.ValidateReference(wrongPlayer, nil); !errors.Is(err, ErrReferenceMismatch) {
+		t.Fatalf("ValidateReference() error = %v, want %v", err, ErrReferenceMismatch)
+	}
+
+	wrongAmount := newProcessedTransaction(t, Bet, "other-amount", "bet-external", "24.99", "", "", "75.01")
+	if err := refund.ValidateReference(wrongAmount, nil); !errors.Is(err, ErrReferenceMismatch) {
+		t.Fatalf("ValidateReference() error = %v, want %v", err, ErrReferenceMismatch)
+	}
+
+	win := newProcessedTransaction(t, Win, "win-internal", "win-external", "25.00", "", "", "125.00")
+	refundForWin := newPendingTransaction(t, Refund, "refund-for-win", "refund-for-win-external", "provider-a", "player-id", "wallet-id", "round-id", "25.00", "win-external")
+	if err := refundForWin.ValidateReference(win, nil); !errors.Is(err, ErrInvalidReferenceKind) {
+		t.Fatalf("ValidateReference() error = %v, want %v", err, ErrInvalidReferenceKind)
+	}
+}
+
+func TestValidateReferencePreventsDuplicateAndConflictingBetReversals(t *testing.T) {
+	bet := newProcessedTransaction(t, Bet, "bet-internal", "bet-external", "25.00", "", "", "75.00")
+	refund := newProcessedTransaction(t, Refund, "refund-internal", "refund-external", "25.00", "bet-external", bet.ID(), "100.00")
+	secondRefund := newPendingTransaction(t, Refund, "refund-2-internal", "refund-2-external", "provider-a", "player-id", "wallet-id", "round-id", "25.00", "bet-external")
+	if err := secondRefund.ValidateReference(bet, []Transaction{refund}); !errors.Is(err, ErrDuplicateReversal) {
+		t.Fatalf("ValidateReference() error = %v, want %v", err, ErrDuplicateReversal)
+	}
+
+	rollbackBet := newPendingTransaction(t, Rollback, "rollback-bet", "rollback-bet-external", "provider-a", "player-id", "wallet-id", "round-id", "25.00", "bet-external")
+	if err := rollbackBet.ValidateReference(bet, []Transaction{refund}); !errors.Is(err, ErrConflictingReversal) {
+		t.Fatalf("ValidateReference() error = %v, want %v", err, ErrConflictingReversal)
+	}
+}
+
+func TestRollbackOfRefundIsAllowed(t *testing.T) {
+	bet := newProcessedTransaction(t, Bet, "bet-internal", "bet-external", "25.00", "", "", "75.00")
+	refund := newProcessedTransaction(t, Refund, "refund-internal", "refund-external", "25.00", "bet-external", bet.ID(), "100.00")
+	rollback := newPendingTransaction(t, Rollback, "rollback-refund", "rollback-refund-external", "provider-a", "player-id", "wallet-id", "round-id", "25.00", "refund-external")
+
+	if err := rollback.ValidateReference(refund, []Transaction{refund}); err != nil {
+		t.Fatalf("ValidateReference() error = %v", err)
+	}
 }
 
 func newExternalParams(t *testing.T, kind Kind, amount, reference string) ExternalParams {
 	t.Helper()
+	return newExternalWithIDs(t, kind, "transaction-id", "external-id", "provider-a", "player-id", "wallet-id", "round-id", amount, reference)
+}
+
+func newExternalWithIDs(t *testing.T, kind Kind, id, externalID, providerID, playerID, walletID, roundID, amount, reference string) ExternalParams {
+	t.Helper()
 	return ExternalParams{
-		ID:                             "transaction-id",
-		ProviderID:                     "provider-a",
-		ExternalTransactionID:          "external-id",
-		IdempotencyKey:                 "provider-a:external-id",
+		ID:                             id,
+		ProviderID:                     providerID,
+		ExternalTransactionID:          externalID,
+		IdempotencyKey:                 providerID + ":" + externalID,
 		PayloadHash:                    "payload-hash",
-		WalletID:                       "wallet-id",
-		PlayerID:                       "player-id",
-		RoundID:                        "round-id",
+		WalletID:                       walletID,
+		PlayerID:                       playerID,
+		RoundID:                        roundID,
 		GameID:                         "game-id",
 		Kind:                           kind,
 		Money:                          mustMoney(t, amount, "BRL"),
 		ReferenceExternalTransactionID: reference,
 		CreatedAt:                      testTime(),
 	}
+}
+
+func newProcessedTransaction(t *testing.T, kind Kind, id, externalID, amount, referenceExternalID, referenceInternalID, balance string) Transaction {
+	t.Helper()
+	params := newExternalWithIDs(t, kind, id, externalID, "provider-a", "player-id", "wallet-id", "round-id", amount, referenceExternalID)
+	if kind == Refund || kind == Rollback {
+		transaction, err := RehydrateExternal(params, Processed, referenceInternalID, "", mustMoney(t, balance, "BRL"), true, testTime().Add(3*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return transaction
+	}
+	transaction, err := NewExternal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transaction.MarkProcessed(mustMoney(t, balance, "BRL"), testTime().Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	return transaction
+}
+
+func newPendingTransaction(t *testing.T, kind Kind, id, externalID, providerID, playerID, walletID, roundID, amount, reference string) Transaction {
+	t.Helper()
+	transaction, err := NewExternal(newExternalWithIDs(t, kind, id, externalID, providerID, playerID, walletID, roundID, amount, reference))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return transaction
 }
 
 func mustMoney(t *testing.T, amount, currency string) money.Money {
