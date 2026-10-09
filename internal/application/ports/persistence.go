@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/junglegaming/backend-challenge-go/internal/application/events"
+	"github.com/junglegaming/backend-challenge-go/internal/domain/money"
 	"github.com/junglegaming/backend-challenge-go/internal/domain/wager"
 	"github.com/junglegaming/backend-challenge-go/internal/domain/wallet"
 )
@@ -30,9 +31,16 @@ type UnitOfWork interface {
 
 type WalletRepository interface {
 	Get(context.Context, string) (wallet.Wallet, error)
+	Reconcile(context.Context, string) (WalletReconciliationSnapshot, error)
 	GetForUpdate(context.Context, string) (wallet.Wallet, error)
 	Create(context.Context, wallet.Wallet) error
 	Save(context.Context, wallet.Wallet, int64) error
+}
+
+type WalletReconciliationSnapshot struct {
+	StoredBalance     money.Money
+	CalculatedBalance money.Money
+	CheckedEntries    int64
 }
 
 type WagerRepository interface {

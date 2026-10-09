@@ -157,6 +157,13 @@ func (r *memoryWallets) Get(ctx context.Context, id string) (domainwallet.Wallet
 	return r.GetForUpdate(ctx, id)
 }
 
+func (r *memoryWallets) Reconcile(_ context.Context, id string) (ports.WalletReconciliationSnapshot, error) {
+	if id != r.account.ID() {
+		return ports.WalletReconciliationSnapshot{}, ports.ErrNotFound
+	}
+	return ports.WalletReconciliationSnapshot{StoredBalance: r.account.Balance(), CalculatedBalance: r.account.Balance()}, nil
+}
+
 func (r *memoryWallets) GetForUpdate(_ context.Context, id string) (domainwallet.Wallet, error) {
 	if id != r.account.ID() {
 		return domainwallet.Wallet{}, ports.ErrNotFound

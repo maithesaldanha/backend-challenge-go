@@ -42,6 +42,39 @@ func (r walletRepository) Get(ctx context.Context, id string) (wallet.Wallet, er
 	return r.get(ctx, id, false)
 }
 
+func (r walletRepository) Reconcile(ctx context.Context, id string) (ports.WalletReconciliationSnapshot, error) {
+	var currency, calculatedText string
+	var storedMinor, checkedEntries int64
+	err := r.tx.QueryRowContext(ctx, `
+		SELECT w.currency, w.balance_minor,
+			COALESCE(SUM(CASE WHEN l.direction = 'CREDIT' THEN l.amount_minor ELSE -l.amount_minor END), 0)::text,
+			COUNT(l.id)
+		FROM wallets w
+	LEFT JOIN wallet_ledger_entries l ON l.wallet_id = w.id
+		WHERE w.id = $1
+		GROUP BY w.id, w.currency, w.balance_minor`, id,
+	).Scan(&currency, &storedMinor, &calculatedText, &checkedEntries)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ports.WalletReconciliationSnapshot{}, ports.ErrNotFound
+	}
+	if err != nil {
+		return ports.WalletReconciliationSnapshot{}, mapError(err)
+	}
+	calculatedMinor, err := strconv.ParseInt(calculatedText, 10, 64)
+	if err != nil {
+		return ports.WalletReconciliationSnapshot{}, err
+	}
+	stored, err := money.FromMinorUnits(storedMinor, strings.TrimSpace(currency))
+	if err != nil {
+		return ports.WalletReconciliationSnapshot{}, err
+	}
+	calculated, err := money.FromMinorUnits(calculatedMinor, strings.TrimSpace(currency))
+	if err != nil {
+		return ports.WalletReconciliationSnapshot{}, err
+	}
+	return ports.WalletReconciliationSnapshot{StoredBalance: stored, CalculatedBalance: calculated, CheckedEntries: checkedEntries}, nil
+}
+
 func (r walletRepository) GetForUpdate(ctx context.Context, id string) (wallet.Wallet, error) {
 	return r.get(ctx, id, true)
 }

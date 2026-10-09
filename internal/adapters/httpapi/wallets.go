@@ -6,12 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,15 +27,17 @@ import (
 )
 
 type Handler struct {
-	openWallet      *applicationwallet.OpenWallet
-	processBet      *applicationwager.ProcessBet
-	processLoss     *applicationwager.ProcessLoss
-	processWin      *applicationwager.ProcessWin
-	processReversal *applicationwager.ProcessReversal
-	readWallet      *applicationwallet.ReadWallet
-	readLedger      *applicationwallet.ReadWalletLedger
-	readTransaction *applicationwager.ReadTransaction
-	auth            ports.Authenticator
+	openWallet                *applicationwallet.OpenWallet
+	processBet                *applicationwager.ProcessBet
+	processLoss               *applicationwager.ProcessLoss
+	processWin                *applicationwager.ProcessWin
+	processReversal           *applicationwager.ProcessReversal
+	readWallet                *applicationwallet.ReadWallet
+	readLedger                *applicationwallet.ReadWalletLedger
+	readTransaction           *applicationwager.ReadTransaction
+	reconcileWallet           *applicationwallet.ReconcileWallet
+	auth                      ports.Authenticator
+	reconciliationDivergences atomic.Uint64
 }
 
 type ledgerCursorPayload struct {
@@ -127,11 +131,11 @@ type wagerResponse struct {
 	IdempotentReplay bool         `json:"idempotentReplay"`
 }
 
-func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal, readWallet *applicationwallet.ReadWallet, readLedger *applicationwallet.ReadWalletLedger, readTransaction *applicationwager.ReadTransaction, authenticator ports.Authenticator) (*Handler, error) {
-	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || processReversal == nil || readWallet == nil || readLedger == nil || readTransaction == nil || authenticator == nil {
+func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal, readWallet *applicationwallet.ReadWallet, readLedger *applicationwallet.ReadWalletLedger, readTransaction *applicationwager.ReadTransaction, reconcileWallet *applicationwallet.ReconcileWallet, authenticator ports.Authenticator) (*Handler, error) {
+	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || processReversal == nil || readWallet == nil || readLedger == nil || readTransaction == nil || reconcileWallet == nil || authenticator == nil {
 		return nil, errors.New("wallet and wager use cases and authenticator are required")
 	}
-	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, processReversal: processReversal, readWallet: readWallet, readLedger: readLedger, readTransaction: readTransaction, auth: authenticator}, nil
+	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, processReversal: processReversal, readWallet: readWallet, readLedger: readLedger, readTransaction: readTransaction, reconcileWallet: reconcileWallet, auth: authenticator}, nil
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -142,7 +146,48 @@ func (h *Handler) Routes() http.Handler {
 	mux.Handle("POST /wagering/transactions", http.HandlerFunc(h.processWagerEndpoint))
 	mux.Handle("GET /wagering/transactions/{transactionID}", http.HandlerFunc(h.readTransactionEndpoint))
 	mux.Handle("GET /providers/{providerID}/wagering/transactions/{externalTransactionID}", http.HandlerFunc(h.readProviderTransactionEndpoint))
+	mux.Handle("POST /wallets/{walletID}/reconciliation", http.HandlerFunc(h.reconcileWalletEndpoint))
+	mux.Handle("GET /metrics", http.HandlerFunc(h.metricsEndpoint))
 	return mux
+}
+
+type reconciliationResponse struct {
+	WalletID          string      `json:"walletId"`
+	StoredBalance     money.Money `json:"storedBalance"`
+	CalculatedBalance money.Money `json:"calculatedBalance"`
+	Difference        money.Money `json:"difference"`
+	Consistent        bool        `json:"consistent"`
+	CheckedEntries    int64       `json:"checkedEntries"`
+}
+
+func (h *Handler) reconcileWalletEndpoint(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorize(w, r, "wallet:write"); !ok {
+		return
+	}
+	walletID := r.PathValue("walletID")
+	if _, err := uuid.Parse(walletID); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
+		return
+	}
+	result, err := h.reconcileWallet.Execute(r.Context(), walletID)
+	if err != nil {
+		writeReadError(w, err)
+		return
+	}
+	if !result.Consistent {
+		h.reconciliationDivergences.Add(1)
+		stored, _ := result.StoredBalance.String()
+		calculated, _ := result.CalculatedBalance.String()
+		difference, _ := result.Difference.String()
+		slog.Error("wallet reconciliation divergence", "wallet_id", result.WalletID, "stored_balance", stored, "calculated_balance", calculated, "difference", difference, "checked_entries", result.CheckedEntries)
+	}
+	writeJSON(w, http.StatusOK, reconciliationResponse{WalletID: result.WalletID, StoredBalance: result.StoredBalance, CalculatedBalance: result.CalculatedBalance, Difference: result.Difference, Consistent: result.Consistent, CheckedEntries: result.CheckedEntries})
+}
+
+func (h *Handler) metricsEndpoint(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprintf(w, "# TYPE wallet_reconciliation_divergences_total counter\nwallet_reconciliation_divergences_total %d\n", h.reconciliationDivergences.Load())
 }
 
 func (h *Handler) readWalletEndpoint(w http.ResponseWriter, r *http.Request) {

@@ -41,6 +41,9 @@ func main() {
 			func(transactor ports.Transactor) (*applicationwallet.ReadWalletLedger, error) {
 				return applicationwallet.NewReadWalletLedger(transactor)
 			},
+			func(transactor ports.Transactor) (*applicationwallet.ReconcileWallet, error) {
+				return applicationwallet.NewReconcileWallet(transactor)
+			},
 			func(transactor ports.Transactor) (*applicationwager.ProcessBet, error) {
 				return applicationwager.NewProcessBet(transactor, uuid.NewString, func() time.Time {
 					return time.Now().UTC()
