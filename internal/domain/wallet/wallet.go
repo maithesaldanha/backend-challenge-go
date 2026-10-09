@@ -10,6 +10,7 @@ import (
 
 var (
 	ErrInvalidIdentity   = errors.New("invalid wallet identity")
+	ErrInvalidTimestamp  = errors.New("invalid wallet timestamp")
 	ErrNegativeBalance   = errors.New("wallet balance cannot be negative")
 	ErrInsufficientFunds = errors.New("insufficient funds")
 	ErrInvalidMovement   = errors.New("movement must be positive")
@@ -44,8 +45,11 @@ const (
 )
 
 func New(id, playerID string, initialBalance money.Money, now time.Time) (Wallet, error) {
-	if id == "" || playerID == "" || now.IsZero() || now.Location() != time.UTC {
+	if id == "" || playerID == "" {
 		return Wallet{}, ErrInvalidIdentity
+	}
+	if now.IsZero() || now.Location() != time.UTC {
+		return Wallet{}, ErrInvalidTimestamp
 	}
 	if _, err := initialBalance.AmountMinor(); err != nil {
 		return Wallet{}, err
@@ -68,8 +72,11 @@ func Rehydrate(id, playerID string, balance money.Money, version int64, createdA
 	if err != nil {
 		return Wallet{}, err
 	}
-	if version < 1 || updatedAt.IsZero() || updatedAt.Before(createdAt) {
+	if version < 1 {
 		return Wallet{}, ErrInvalidIdentity
+	}
+	if updatedAt.IsZero() || updatedAt.Location() != time.UTC || updatedAt.Before(createdAt) {
+		return Wallet{}, ErrInvalidTimestamp
 	}
 	wallet.version = version
 	wallet.updatedAt = updatedAt
@@ -97,8 +104,11 @@ func (w *Wallet) Credit(ledgerID, transactionID string, amount money.Money, now 
 }
 
 func (w *Wallet) move(ledgerID, transactionID string, amount money.Money, now time.Time, direction Direction) (LedgerEntry, error) {
-	if w.id == "" || ledgerID == "" || transactionID == "" || now.IsZero() || now.Location() != time.UTC {
+	if w.id == "" || ledgerID == "" || transactionID == "" {
 		return LedgerEntry{}, ErrInvalidIdentity
+	}
+	if now.IsZero() || now.Location() != time.UTC || now.Before(w.updatedAt) {
+		return LedgerEntry{}, ErrInvalidTimestamp
 	}
 	minor, err := amount.AmountMinor()
 	if err != nil {

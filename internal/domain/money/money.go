@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 )
 
 var (
@@ -51,7 +52,7 @@ func Parse(amount, currency string) (Money, error) {
 	}
 	whole, err := parseDigits(parts.whole, limit/100)
 	if err != nil {
-		return Money{}, ErrInvalidAmount
+		return Money{}, err
 	}
 	fraction, _ := parseDigits(parts.fraction, 99)
 	minor := whole*100 + fraction
@@ -68,6 +69,12 @@ func Parse(amount, currency string) (Money, error) {
 }
 
 func NewExternal(amount, currency string) (Money, error) {
+	if !validCurrency(currency) {
+		return Money{}, ErrInvalidCurrency
+	}
+	if strings.HasPrefix(amount, "-") {
+		return Money{}, ErrNegativeAmount
+	}
 	value, err := Parse(amount, currency)
 	if err != nil {
 		return Money{}, err
