@@ -2,7 +2,7 @@
 
 ## Estado atual
 
-O repositório está em implementação incremental. Neste momento, estão disponíveis o domínio básico, persistência PostgreSQL, abertura de carteira e processamento de aposta, além de `POST /wallets` protegido por Keycloak. Consumidor SQS, demais operações de aposta, workers de inbox/outbox, health checks e testes abrangentes ainda não estão implementados. O Compose abaixo sobe a infraestrutura local e a API para exercitar a abertura de carteira.
+O repositório está em implementação incremental. Neste momento, estão disponíveis o domínio básico, persistência PostgreSQL, abertura de carteira e o primeiro fluxo HTTP de aposta (`BET`), ambos protegidos por Keycloak. Consumidor SQS, outras operações de aposta, workers de inbox/outbox, health checks e testes abrangentes ainda não estão implementados.
 
 ## Executar localmente com Docker Compose
 
@@ -17,7 +17,7 @@ docker compose up --build
 
 O PostgreSQL fica disponível na porta `5433`, o Keycloak na `8081` e a API na `8080`. O schema inicial é aplicado automaticamente quando o volume do PostgreSQL é criado pela primeira vez. Se já existir um volume antigo, aplique as migrations conforme a seção abaixo; `docker compose down -v` apaga os dados locais.
 
-O realm `backend` configura o client de serviço `wallet-service`, o audience `backend-api` e a role `wallet:write`. Para obter um token de desenvolvimento:
+O realm `backend` configura o client de serviço `wallet-service`, o audience `backend-api`, as roles locais `wallet:write` e `wager:write`, e a identidade `local-provider`. Para obter um token de desenvolvimento:
 
 ```powershell
 $tokenResponse = Invoke-RestMethod -Method Post -Uri http://localhost:8081/realms/backend/protocol/openid-connect/token -ContentType 'application/x-www-form-urlencoded' -Body @{ grant_type = 'client_credentials'; client_id = 'wallet-service'; client_secret = 'wallet-local-secret' }
@@ -28,10 +28,18 @@ Abra uma carteira enviando UUID válido para `playerId`:
 
 ```powershell
 $body = @{ playerId = '0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1'; initialBalance = @{ amount = '1000.00'; currency = 'BRL' } } | ConvertTo-Json
-Invoke-RestMethod -Method Post -Uri http://localhost:8080/wallets -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body $body
+$wallet = Invoke-RestMethod -Method Post -Uri http://localhost:8080/wallets -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body $body
+$wallet
 ```
 
-O saldo deve ser string decimal com duas casas. Repetir o mesmo jogador e moeda retorna conflito (`409`). O segredo e as senhas do Compose não devem ser usados fora da máquina local.
+Envie uma aposta usando o `id` retornado na abertura. O provedor é obtido do token; não envie `providerId` no corpo:
+
+```powershell
+$bet = @{ externalTransactionId = 'local-bet-001'; playerId = '0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1'; walletId = $wallet.id; roundId = 'local-round-001'; gameId = 'demo-game'; money = @{ amount = '25.00'; currency = 'BRL' } } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/wagering/transactions -Headers @{ Authorization = "Bearer $token"; 'Idempotency-Key' = 'local-provider:local-bet-001' } -ContentType 'application/json' -Body $bet
+```
+
+O endpoint implementado aceita somente `BET`. Repita a mesma chamada para receber o resultado persistido com `idempotentReplay: true`; reutilizar a chave com conteúdo diferente resulta em `409`. Saldo insuficiente é registrado como rejeição (`422`). O saldo deve ser string decimal com duas casas. Repetir a abertura do mesmo jogador e moeda retorna conflito (`409`). O segredo e as senhas do Compose não devem ser usados fora da máquina local.
 
 Para parar os serviços sem apagar dados:
 

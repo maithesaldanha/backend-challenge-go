@@ -12,6 +12,7 @@ import (
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/httpapi"
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/postgres"
 	"github.com/junglegaming/backend-challenge-go/internal/application/ports"
+	applicationwager "github.com/junglegaming/backend-challenge-go/internal/application/wager"
 	applicationwallet "github.com/junglegaming/backend-challenge-go/internal/application/wallet"
 	"go.uber.org/fx"
 )
@@ -30,6 +31,11 @@ func main() {
 			func(transactor *postgres.Transactor) ports.Transactor { return transactor },
 			func(transactor ports.Transactor) (*applicationwallet.OpenWallet, error) {
 				return applicationwallet.NewOpenWallet(transactor, uuid.NewString, func() time.Time {
+					return time.Now().UTC()
+				})
+			},
+			func(transactor ports.Transactor) (*applicationwager.ProcessBet, error) {
+				return applicationwager.NewProcessBet(transactor, uuid.NewString, func() time.Time {
 					return time.Now().UTC()
 				})
 			},

@@ -4,7 +4,8 @@
   "sslRequired": "none",
   "roles": {
     "realm": [
-      { "name": "wallet:write" }
+      { "name": "wallet:write" },
+      { "name": "wager:write" }
     ]
   },
   "clients": [
@@ -37,6 +38,19 @@
             "id.token.claim": "false",
             "access.token.claim": "true"
           }
+        },
+        {
+          "name": "local provider identity",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "provider_id",
+            "claim.value": "local-provider",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
         }
       ]
     }
@@ -46,7 +60,7 @@
       "username": "service-account-wallet-service",
       "enabled": true,
       "serviceAccountClientId": "wallet-service",
-      "realmRoles": ["wallet:write"]
+      "realmRoles": ["wallet:write", "wager:write"]
     }
   ]
 }
