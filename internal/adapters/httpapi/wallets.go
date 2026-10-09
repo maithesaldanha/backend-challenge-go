@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	applicationhealth "github.com/junglegaming/backend-challenge-go/internal/application/health"
 	"github.com/junglegaming/backend-challenge-go/internal/application/ports"
 	applicationwager "github.com/junglegaming/backend-challenge-go/internal/application/wager"
 	applicationwallet "github.com/junglegaming/backend-challenge-go/internal/application/wallet"
@@ -36,6 +38,7 @@ type Handler struct {
 	readLedger                *applicationwallet.ReadWalletLedger
 	readTransaction           *applicationwager.ReadTransaction
 	reconcileWallet           *applicationwallet.ReconcileWallet
+	readiness                 *applicationhealth.Readiness
 	auth                      ports.Authenticator
 	reconciliationDivergences atomic.Uint64
 }
@@ -131,11 +134,11 @@ type wagerResponse struct {
 	IdempotentReplay bool         `json:"idempotentReplay"`
 }
 
-func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal, readWallet *applicationwallet.ReadWallet, readLedger *applicationwallet.ReadWalletLedger, readTransaction *applicationwager.ReadTransaction, reconcileWallet *applicationwallet.ReconcileWallet, authenticator ports.Authenticator) (*Handler, error) {
-	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || processReversal == nil || readWallet == nil || readLedger == nil || readTransaction == nil || reconcileWallet == nil || authenticator == nil {
+func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal, readWallet *applicationwallet.ReadWallet, readLedger *applicationwallet.ReadWalletLedger, readTransaction *applicationwager.ReadTransaction, reconcileWallet *applicationwallet.ReconcileWallet, readiness *applicationhealth.Readiness, authenticator ports.Authenticator) (*Handler, error) {
+	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || processReversal == nil || readWallet == nil || readLedger == nil || readTransaction == nil || reconcileWallet == nil || readiness == nil || authenticator == nil {
 		return nil, errors.New("wallet and wager use cases and authenticator are required")
 	}
-	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, processReversal: processReversal, readWallet: readWallet, readLedger: readLedger, readTransaction: readTransaction, reconcileWallet: reconcileWallet, auth: authenticator}, nil
+	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, processReversal: processReversal, readWallet: readWallet, readLedger: readLedger, readTransaction: readTransaction, reconcileWallet: reconcileWallet, readiness: readiness, auth: authenticator}, nil
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -148,7 +151,36 @@ func (h *Handler) Routes() http.Handler {
 	mux.Handle("GET /providers/{providerID}/wagering/transactions/{externalTransactionID}", http.HandlerFunc(h.readProviderTransactionEndpoint))
 	mux.Handle("POST /wallets/{walletID}/reconciliation", http.HandlerFunc(h.reconcileWalletEndpoint))
 	mux.Handle("GET /metrics", http.HandlerFunc(h.metricsEndpoint))
+	mux.Handle("GET /health/live", http.HandlerFunc(h.livenessEndpoint))
+	mux.Handle("GET /health/ready", http.HandlerFunc(h.readinessEndpoint))
 	return mux
+}
+
+func (h *Handler) livenessEndpoint(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
+}
+
+func (h *Handler) readinessEndpoint(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	statuses, ready := h.readiness.Check(ctx)
+	dependencies := make(map[string]string, len(statuses))
+	for _, dependency := range statuses {
+		dependencies[dependency.Name] = "ok"
+		if !dependency.OK {
+			dependencies[dependency.Name] = "unavailable"
+		}
+	}
+	status := http.StatusOK
+	state := "ready"
+	if !ready {
+		status = http.StatusServiceUnavailable
+		state = "not_ready"
+	}
+	writeJSON(w, status, struct {
+		Status       string            `json:"status"`
+		Dependencies map[string]string `json:"dependencies"`
+	}{Status: state, Dependencies: dependencies})
 }
 
 type reconciliationResponse struct {

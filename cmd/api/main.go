@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/auth"
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/httpapi"
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/postgres"
+	applicationhealth "github.com/junglegaming/backend-challenge-go/internal/application/health"
 	"github.com/junglegaming/backend-challenge-go/internal/application/ports"
 	applicationwager "github.com/junglegaming/backend-challenge-go/internal/application/wager"
 	applicationwallet "github.com/junglegaming/backend-challenge-go/internal/application/wallet"
@@ -30,6 +32,11 @@ func main() {
 		httpapi.Module(config.http),
 		fx.Provide(
 			func(transactor *postgres.Transactor) ports.Transactor { return transactor },
+			func(db *sql.DB) (*postgres.HealthChecker, error) { return postgres.NewHealthChecker(db) },
+			func(checker *postgres.HealthChecker) ports.HealthChecker { return checker },
+			func(checker ports.HealthChecker) (*applicationhealth.Readiness, error) {
+				return applicationhealth.NewReadiness(checker)
+			},
 			func(transactor ports.Transactor) (*applicationwallet.OpenWallet, error) {
 				return applicationwallet.NewOpenWallet(transactor, uuid.NewString, func() time.Time {
 					return time.Now().UTC()

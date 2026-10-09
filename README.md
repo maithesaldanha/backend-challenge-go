@@ -2,7 +2,7 @@
 
 ## Estado atual
 
-O repositório está em implementação incremental. Estão disponíveis a abertura, leitura e reconciliação de carteiras, leitura paginada do ledger, processamento e consulta de transações (`BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK`), persistência PostgreSQL e autenticação Keycloak. Consumidor SQS, publicação da outbox, health checks e testes abrangentes ainda não estão implementados.
+O repositório está em implementação incremental. Estão disponíveis a abertura, leitura e reconciliação de carteiras, leitura paginada do ledger, processamento e consulta de transações (`BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK`), persistência PostgreSQL, autenticação Keycloak e endpoints de liveness/readiness do PostgreSQL. Consumidor SQS, publicação da outbox, readiness do SQS e testes abrangentes ainda não estão implementados.
 
 ## Executar localmente com Docker Compose
 
@@ -72,6 +72,8 @@ Get-Content migrations/000002_wallet_ledger_read_index.down.sql | docker compose
 Os endpoints `GET /wallets/{walletId}` e `GET /wallets/{walletId}/ledger` exigem `wallet:write`. O ledger aceita `limit` entre 1 e 100 (padrão 50) e devolve `nextCursor` opaco quando há outra página. Use o cursor como recebido, sem decodificá-lo. `GET /wagering/transactions/{transactionId}` também exige acesso interno `wallet:write`. Para consulta por identidade externa, use `GET /providers/{providerId}/wagering/transactions/{externalTransactionId}` com `wager:write`; o `providerId` deve corresponder ao claim do token. As respostas de transação incluem estado e código de falha, quando disponíveis, sem expor a chave de idempotência nem o hash interno do payload.
 
 `POST /wallets/{walletId}/reconciliation` exige `wallet:write` e compara o saldo salvo com a soma exata dos créditos e débitos do ledger em uma única consulta SQL. O endpoint não altera a carteira; divergências retornam `consistent: false`, geram log estruturado e incrementam `wallet_reconciliation_divergences_total`, exposta em `GET /metrics`.
+
+`GET /health/live` é público e confirma que o processo HTTP responde. `GET /health/ready` é público, aplica timeout de dois segundos e verifica PostgreSQL; retorna `503` quando o banco não responde. A checagem de SQS será adicionada junto com a integração do broker, que ainda não está implementada.
 
 ## Verificações disponíveis
 

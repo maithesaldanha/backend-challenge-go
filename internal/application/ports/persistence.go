@@ -22,6 +22,11 @@ type Transactor interface {
 	WithinTransaction(context.Context, func(context.Context, UnitOfWork) error) error
 }
 
+type HealthChecker interface {
+	Name() string
+	Check(context.Context) error
+}
+
 type UnitOfWork interface {
 	Wallets() WalletRepository
 	Wagers() WagerRepository
