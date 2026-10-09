@@ -17,7 +17,7 @@ const (
 	referenceRetryLease           = 30 * time.Second
 )
 
-type RetryPendingWins struct {
+type RetryPendingReferences struct {
 	transactor  ports.Transactor
 	newID       func() string
 	now         func() time.Time
@@ -26,11 +26,11 @@ type RetryPendingWins struct {
 	maxDelay    time.Duration
 }
 
-func NewRetryPendingWins(transactor ports.Transactor, newID func() string, now func() time.Time) (*RetryPendingWins, error) {
+func NewRetryPendingReferences(transactor ports.Transactor, newID func() string, now func() time.Time) (*RetryPendingReferences, error) {
 	if transactor == nil || newID == nil || now == nil {
 		return nil, ErrInvalidDependencies
 	}
-	return &RetryPendingWins{
+	return &RetryPendingReferences{
 		transactor:  transactor,
 		newID:       newID,
 		now:         now,
@@ -40,7 +40,7 @@ func NewRetryPendingWins(transactor ports.Transactor, newID func() string, now f
 	}, nil
 }
 
-func (p *RetryPendingWins) ProcessBatch(ctx context.Context, limit int) (int, error) {
+func (p *RetryPendingReferences) ProcessBatch(ctx context.Context, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
@@ -58,7 +58,7 @@ func (p *RetryPendingWins) ProcessBatch(ctx context.Context, limit int) (int, er
 	return processed, nil
 }
 
-func (p *RetryPendingWins) processOne(ctx context.Context) (bool, error) {
+func (p *RetryPendingReferences) processOne(ctx context.Context) (bool, error) {
 	now := p.now()
 	didWork := false
 	err := p.transactor.WithinTransaction(ctx, func(txctx context.Context, unit ports.UnitOfWork) error {
@@ -116,19 +116,38 @@ func (p *RetryPendingWins) processOne(ctx context.Context) (bool, error) {
 		if reference.Status() != wager.Processed {
 			return p.reject(txctx, unit, transaction, "REFERENCE_NOT_PROCESSED", now)
 		}
-		if err := transaction.ResolveReference(reference, nil, now); err != nil {
+		var reversals []wager.Transaction
+		if transaction.Kind() == wager.Refund || transaction.Kind() == wager.Rollback {
+			reversals, err = unit.Wagers().FindProcessedReversals(txctx, reference.ID())
+			if err != nil {
+				return err
+			}
+		}
+		if err := transaction.ResolveReference(reference, reversals, now); err != nil {
 			switch {
 			case errors.Is(err, wager.ErrInvalidReferenceKind):
 				return p.reject(txctx, unit, transaction, "REFERENCE_KIND_INVALID", now)
 			case errors.Is(err, wager.ErrReferenceMismatch):
 				return p.reject(txctx, unit, transaction, "REFERENCE_MISMATCH", now)
+			case errors.Is(err, wager.ErrDuplicateReversal):
+				return p.reject(txctx, unit, transaction, "DUPLICATE_REVERSAL", now)
+			case errors.Is(err, wager.ErrConflictingReversal):
+				return p.reject(txctx, unit, transaction, "CONFLICTING_REVERSAL", now)
 			default:
 				return err
 			}
 		}
 
 		previousVersion := account.Version()
-		ledgerEntry, err := account.Credit(p.newID(), transaction.ID(), transaction.Money(), now)
+		var ledgerEntry wallet.LedgerEntry
+		if transaction.Kind() == wager.Rollback && reference.Kind() != wager.Bet {
+			ledgerEntry, err = account.Debit(p.newID(), transaction.ID(), transaction.Money(), now)
+			if errors.Is(err, wallet.ErrInsufficientFunds) {
+				return p.reject(txctx, unit, transaction, "INSUFFICIENT_FUNDS_FOR_ROLLBACK", now)
+			}
+		} else {
+			ledgerEntry, err = account.Credit(p.newID(), transaction.ID(), transaction.Money(), now)
+		}
 		if errors.Is(err, money.ErrOverflow) {
 			return p.reject(txctx, unit, transaction, "BALANCE_LIMIT_EXCEEDED", now)
 		}
@@ -147,7 +166,7 @@ func (p *RetryPendingWins) processOne(ctx context.Context) (bool, error) {
 		if err := unit.Ledger().Append(txctx, ledgerEntry); err != nil {
 			return err
 		}
-		if err := appendProcessedEvents(txctx, unit, p.newID, transaction, ledgerEntry, account.Version(), now); err != nil {
+		if err := appendProcessedEvents(txctx, unit, p.newID, transaction, ledgerEntry, account.Version(), now, transaction.ID()); err != nil {
 			return err
 		}
 		return nil
@@ -158,7 +177,7 @@ func (p *RetryPendingWins) processOne(ctx context.Context) (bool, error) {
 	return didWork, nil
 }
 
-func (p *RetryPendingWins) reject(ctx context.Context, unit ports.UnitOfWork, transaction wager.Transaction, code string, now time.Time) error {
+func (p *RetryPendingReferences) reject(ctx context.Context, unit ports.UnitOfWork, transaction wager.Transaction, code string, now time.Time) error {
 	if err := transaction.Reject(code, now); err != nil {
 		return err
 	}
@@ -172,7 +191,7 @@ func (p *RetryPendingWins) reject(ctx context.Context, unit ports.UnitOfWork, tr
 	return unit.Outbox().Append(ctx, event)
 }
 
-func (p *RetryPendingWins) retryDelay(attempt int) time.Duration {
+func (p *RetryPendingReferences) retryDelay(attempt int) time.Duration {
 	delay := p.baseDelay
 	for i := 1; i < attempt && delay < p.maxDelay; i++ {
 		if delay > p.maxDelay/2 {
@@ -186,15 +205,15 @@ func (p *RetryPendingWins) retryDelay(attempt int) time.Duration {
 	return delay
 }
 
-func appendProcessedEvents(ctx context.Context, unit ports.UnitOfWork, newID func() string, transaction wager.Transaction, entry wallet.LedgerEntry, walletVersion int64, now time.Time) error {
-	processedEvent, err := appevents.NewWagerTransactionProcessed(newID(), transaction.ID(), transaction, now)
+func appendProcessedEvents(ctx context.Context, unit ports.UnitOfWork, newID func() string, transaction wager.Transaction, entry wallet.LedgerEntry, walletVersion int64, now time.Time, correlation string) error {
+	processedEvent, err := appevents.NewWagerTransactionProcessed(newID(), correlation, transaction, now)
 	if err != nil {
 		return err
 	}
 	if err := unit.Outbox().Append(ctx, processedEvent); err != nil {
 		return err
 	}
-	balanceEvent, err := appevents.NewWalletBalanceChanged(newID(), transaction.ID(), entry, walletVersion, now)
+	balanceEvent, err := appevents.NewWalletBalanceChanged(newID(), correlation, entry, walletVersion, now)
 	if err != nil {
 		return err
 	}

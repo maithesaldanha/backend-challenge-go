@@ -50,8 +50,13 @@ func main() {
 					return time.Now().UTC()
 				})
 			},
-			func(transactor ports.Transactor) (*applicationwager.RetryPendingWins, error) {
-				return applicationwager.NewRetryPendingWins(transactor, uuid.NewString, func() time.Time {
+			func(transactor ports.Transactor) (*applicationwager.ProcessReversal, error) {
+				return applicationwager.NewProcessReversal(transactor, uuid.NewString, func() time.Time {
+					return time.Now().UTC()
+				})
+			},
+			func(transactor ports.Transactor) (*applicationwager.RetryPendingReferences, error) {
+				return applicationwager.NewRetryPendingReferences(transactor, uuid.NewString, func() time.Time {
 					return time.Now().UTC()
 				})
 			},
@@ -65,7 +70,7 @@ func main() {
 	app.Run()
 }
 
-func registerReferenceRetryWorker(lifecycle fx.Lifecycle, processor *applicationwager.RetryPendingWins) {
+func registerReferenceRetryWorker(lifecycle fx.Lifecycle, processor *applicationwager.RetryPendingReferences) {
 	var cancel context.CancelFunc
 	var done chan struct{}
 	lifecycle.Append(fx.Hook{
@@ -80,7 +85,7 @@ func registerReferenceRetryWorker(lifecycle fx.Lifecycle, processor *application
 				for {
 					count, err := processor.ProcessBatch(workerContext, 50)
 					if err != nil {
-						log.Printf("pending WIN retry failed: %v", err)
+						log.Printf("pending reference retry failed: %v", err)
 					}
 					if count == 50 {
 						continue

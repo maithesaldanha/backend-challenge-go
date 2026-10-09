@@ -35,6 +35,7 @@ type WagerCommand struct {
 type BetCommand = WagerCommand
 type LossCommand = WagerCommand
 type WinCommand = WagerCommand
+type ReversalCommand = WagerCommand
 
 type WagerResult struct {
 	Transaction      domainwager.Transaction
@@ -44,6 +45,7 @@ type WagerResult struct {
 type BetResult = WagerResult
 type LossResult = WagerResult
 type WinResult = WagerResult
+type ReversalResult = WagerResult
 
 type ProcessBet struct {
 	transactor ports.Transactor

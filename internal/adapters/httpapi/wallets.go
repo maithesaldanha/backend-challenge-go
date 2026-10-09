@@ -22,11 +22,12 @@ import (
 )
 
 type Handler struct {
-	openWallet  *applicationwallet.OpenWallet
-	processBet  *applicationwager.ProcessBet
-	processLoss *applicationwager.ProcessLoss
-	processWin  *applicationwager.ProcessWin
-	auth        ports.Authenticator
+	openWallet      *applicationwallet.OpenWallet
+	processBet      *applicationwager.ProcessBet
+	processLoss     *applicationwager.ProcessLoss
+	processWin      *applicationwager.ProcessWin
+	processReversal *applicationwager.ProcessReversal
+	auth            ports.Authenticator
 }
 
 type openWalletRequest struct {
@@ -72,11 +73,11 @@ type wagerResponse struct {
 	IdempotentReplay bool         `json:"idempotentReplay"`
 }
 
-func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, authenticator ports.Authenticator) (*Handler, error) {
-	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || authenticator == nil {
+func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal, authenticator ports.Authenticator) (*Handler, error) {
+	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || processReversal == nil || authenticator == nil {
 		return nil, errors.New("wallet opener, wager processors, and authenticator are required")
 	}
-	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, auth: authenticator}, nil
+	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, processReversal: processReversal, auth: authenticator}, nil
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -174,7 +175,7 @@ func (h *Handler) processWagerEndpoint(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = string(domainwager.Bet)
 	}
-	if kind != string(domainwager.Bet) && kind != string(domainwager.Loss) && kind != string(domainwager.Win) {
+	if kind != string(domainwager.Bet) && kind != string(domainwager.Loss) && kind != string(domainwager.Win) && kind != string(domainwager.Refund) && kind != string(domainwager.Rollback) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unsupported_transaction_kind"})
 		return
 	}
@@ -211,6 +212,8 @@ func (h *Handler) processWagerEndpoint(w http.ResponseWriter, r *http.Request) {
 		result, err = h.processLoss.Execute(r.Context(), command)
 	} else if kind == string(domainwager.Win) {
 		result, err = h.processWin.Execute(r.Context(), command)
+	} else if kind == string(domainwager.Refund) || kind == string(domainwager.Rollback) {
+		result, err = h.processReversal.Execute(r.Context(), domainwager.Kind(kind), command)
 	} else {
 		result, err = h.processBet.Execute(r.Context(), command)
 	}
@@ -303,14 +306,14 @@ func writeWagerError(w http.ResponseWriter, err error) {
 	case errors.Is(err, money.ErrInvalidAmount), errors.Is(err, money.ErrInvalidCurrency),
 		errors.Is(err, money.ErrNegativeAmount), errors.Is(err, money.ErrUninitializedMoney),
 		errors.Is(err, money.ErrCurrencyMismatch), errors.Is(err, domainwager.ErrInvalidTransaction),
-		errors.Is(err, domainwager.ErrInvalidKind):
+		errors.Is(err, domainwager.ErrInvalidKind), errors.Is(err, domainwager.ErrReferenceRequired):
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
 	default:
 		var postgresError *pgconn.PgError
 		if errors.As(err, &postgresError) {
-			slog.Error("bet processing failed", "sqlstate", postgresError.Code, "constraint", postgresError.ConstraintName, "message", postgresError.Message)
+			slog.Error("wager processing failed", "sqlstate", postgresError.Code, "constraint", postgresError.ConstraintName, "message", postgresError.Message)
 		} else {
-			slog.Error("bet processing failed", "error", err.Error())
+			slog.Error("wager processing failed", "error", err.Error())
 		}
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal_error"})
 	}

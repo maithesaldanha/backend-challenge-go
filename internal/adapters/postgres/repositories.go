@@ -127,7 +127,7 @@ func (r wagerRepository) FindReference(ctx context.Context, providerID, external
 func (r wagerRepository) FindDuePendingReference(ctx context.Context, now time.Time) (wager.Transaction, error) {
 	return r.findOne(ctx, `SELECT `+wagerColumns+`
 		FROM wager_transactions
-		WHERE kind = 'WIN' AND status = 'PENDING_REFERENCE'
+		WHERE kind IN ('WIN', 'REFUND', 'ROLLBACK') AND status = 'PENDING_REFERENCE'
 			AND next_attempt_at <= $1 AND (lease_until IS NULL OR lease_until <= $1)
 		ORDER BY next_attempt_at, created_at
 		LIMIT 1`, now)
@@ -138,7 +138,7 @@ func (r wagerRepository) ClaimPendingReference(ctx context.Context, id string, n
 	err := r.tx.QueryRowContext(ctx, `
 		UPDATE wager_transactions
 		SET attempt_count = attempt_count + 1, lease_until = $1
-		WHERE id = $2 AND kind = 'WIN' AND status = 'PENDING_REFERENCE'
+		WHERE id = $2 AND kind IN ('WIN', 'REFUND', 'ROLLBACK') AND status = 'PENDING_REFERENCE'
 			AND next_attempt_at <= $3 AND (lease_until IS NULL OR lease_until <= $3)
 		RETURNING attempt_count`, leaseUntil, id, now).Scan(&attempts)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -151,7 +151,7 @@ func (r wagerRepository) SchedulePendingReference(ctx context.Context, id string
 	result, err := r.tx.ExecContext(ctx, `
 		UPDATE wager_transactions
 		SET next_attempt_at = $1, lease_until = NULL
-		WHERE id = $2 AND kind = 'WIN' AND status = 'PENDING_REFERENCE'`, nextAttemptAt, id)
+		WHERE id = $2 AND kind IN ('WIN', 'REFUND', 'ROLLBACK') AND status = 'PENDING_REFERENCE'`, nextAttemptAt, id)
 	if err != nil {
 		return mapError(err)
 	}
