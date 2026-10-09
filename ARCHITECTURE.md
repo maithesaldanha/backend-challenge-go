@@ -10,6 +10,8 @@ The initial schema uses PostgreSQL constraints for wallet uniqueness, non-negati
 
 Writers should serialize by wallet row using `SELECT ... FOR UPDATE`. This keeps independent wallets parallel and prevents two database processes from spending the same balance. The database constraints remain the final guard if application code or another writer violates the expected sequence.
 
+Application persistence ports expose one `UnitOfWork` per SQL transaction. The wallet lock, idempotency lookup, wager state change, wallet update, ledger append, and outbox writes must use repositories from that same unit. `WalletRepository.Save` receives the version read before mutation so the SQL update can also use a version predicate.
+
 Ledger rows reject updates and deletes through a trigger. The application database role must not own the schema or have privileges to disable triggers, truncate the ledger, or alter tables.
 
 ## Idempotency and messaging
@@ -28,4 +30,4 @@ A processed bet may have one successful direct reversal: either `REFUND` or `ROL
 
 ## Current implementation boundary
 
-The domain model and the initial schema are being implemented first. Repository code, transaction orchestration, retry workers, event publishing, authentication, HTTP, SQS, and Fx lifecycle remain to be added. The migration has not yet been applied against PostgreSQL in this workspace.
+The `ProcessBet` application use case handles synchronous bets through the persistence ports. It checks idempotent replays, locks the wallet row through the repository, and commits the wager, balance, ledger, and resulting outbox events together. The SQL adapters, other wager kinds, retry workers, event publishing, authentication, HTTP, SQS, and Fx lifecycle remain to be added. The migration has not yet been applied against PostgreSQL in this workspace.
