@@ -124,6 +124,47 @@ func (r wagerRepository) FindReference(ctx context.Context, providerID, external
 	return r.FindByExternalTransactionID(ctx, providerID, externalID)
 }
 
+func (r wagerRepository) FindDuePendingReference(ctx context.Context, now time.Time) (wager.Transaction, error) {
+	return r.findOne(ctx, `SELECT `+wagerColumns+`
+		FROM wager_transactions
+		WHERE kind = 'WIN' AND status = 'PENDING_REFERENCE'
+			AND next_attempt_at <= $1 AND (lease_until IS NULL OR lease_until <= $1)
+		ORDER BY next_attempt_at, created_at
+		LIMIT 1`, now)
+}
+
+func (r wagerRepository) ClaimPendingReference(ctx context.Context, id string, now, leaseUntil time.Time) (int, error) {
+	var attempts int
+	err := r.tx.QueryRowContext(ctx, `
+		UPDATE wager_transactions
+		SET attempt_count = attempt_count + 1, lease_until = $1
+		WHERE id = $2 AND kind = 'WIN' AND status = 'PENDING_REFERENCE'
+			AND next_attempt_at <= $3 AND (lease_until IS NULL OR lease_until <= $3)
+		RETURNING attempt_count`, leaseUntil, id, now).Scan(&attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ports.ErrConflict
+	}
+	return attempts, mapError(err)
+}
+
+func (r wagerRepository) SchedulePendingReference(ctx context.Context, id string, nextAttemptAt time.Time) error {
+	result, err := r.tx.ExecContext(ctx, `
+		UPDATE wager_transactions
+		SET next_attempt_at = $1, lease_until = NULL
+		WHERE id = $2 AND kind = 'WIN' AND status = 'PENDING_REFERENCE'`, nextAttemptAt, id)
+	if err != nil {
+		return mapError(err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ports.ErrConflict
+	}
+	return nil
+}
+
 func (r wagerRepository) FindProcessedReversals(ctx context.Context, referenceID string) ([]wager.Transaction, error) {
 	rows, err := r.tx.QueryContext(ctx, `SELECT `+wagerColumns+`
 		FROM wager_transactions
@@ -281,7 +322,8 @@ func (r wagerRepository) write(ctx context.Context, transaction wager.Transactio
 	result, err := r.tx.ExecContext(ctx, `
 		UPDATE wager_transactions
 		SET reference_transaction_id = $1, reference_kind = $2, status = $3,
-			failure_code = $4, result_balance_minor = $5, updated_at = $6
+			failure_code = $4, result_balance_minor = $5, next_attempt_at = $6,
+			lease_until = NULL, updated_at = $6
 		WHERE id = $7 AND status IN ('PENDING', 'PENDING_REFERENCE')`,
 		referenceID, referenceKind, transaction.Status(), failureCode, resultBalance,
 		transaction.UpdatedAt(), transaction.ID())

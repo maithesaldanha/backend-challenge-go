@@ -3,6 +3,7 @@ package ports
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/junglegaming/backend-challenge-go/internal/application/events"
 	"github.com/junglegaming/backend-challenge-go/internal/domain/wager"
@@ -38,6 +39,9 @@ type WagerRepository interface {
 	FindByIdempotencyKey(context.Context, string, string) (wager.Transaction, error)
 	FindByExternalTransactionID(context.Context, string, string) (wager.Transaction, error)
 	FindReference(context.Context, string, string) (wager.Transaction, error)
+	FindDuePendingReference(context.Context, time.Time) (wager.Transaction, error)
+	ClaimPendingReference(context.Context, string, time.Time, time.Time) (int, error)
+	SchedulePendingReference(context.Context, string, time.Time) error
 	FindProcessedReversals(context.Context, string) ([]wager.Transaction, error)
 	Create(context.Context, wager.Transaction) error
 	Save(context.Context, wager.Transaction) error

@@ -208,6 +208,18 @@ func (r *memoryWagers) FindReference(context.Context, string, string) (domainwag
 	return domainwager.Transaction{}, ports.ErrNotFound
 }
 
+func (r *memoryWagers) FindDuePendingReference(context.Context, time.Time) (domainwager.Transaction, error) {
+	return domainwager.Transaction{}, ports.ErrNotFound
+}
+
+func (r *memoryWagers) ClaimPendingReference(context.Context, string, time.Time, time.Time) (int, error) {
+	return 0, ports.ErrConflict
+}
+
+func (r *memoryWagers) SchedulePendingReference(context.Context, string, time.Time) error {
+	return errors.New("unexpected pending reference scheduling")
+}
+
 func (r *memoryWagers) FindProcessedReversals(context.Context, string) ([]domainwager.Transaction, error) {
 	return nil, nil
 }

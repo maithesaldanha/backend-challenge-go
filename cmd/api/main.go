@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -49,13 +50,63 @@ func main() {
 					return time.Now().UTC()
 				})
 			},
+			func(transactor ports.Transactor) (*applicationwager.RetryPendingWins, error) {
+				return applicationwager.NewRetryPendingWins(transactor, uuid.NewString, func() time.Time {
+					return time.Now().UTC()
+				})
+			},
 		),
+		fx.Invoke(registerReferenceRetryWorker),
 	)
 	if err := app.Err(); err != nil {
 		log.Printf("application setup failed: %v", err)
 		os.Exit(1)
 	}
 	app.Run()
+}
+
+func registerReferenceRetryWorker(lifecycle fx.Lifecycle, processor *applicationwager.RetryPendingWins) {
+	var cancel context.CancelFunc
+	var done chan struct{}
+	lifecycle.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			workerContext, stop := context.WithCancel(context.Background())
+			cancel = stop
+			done = make(chan struct{})
+			go func() {
+				defer close(done)
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+				for {
+					count, err := processor.ProcessBatch(workerContext, 50)
+					if err != nil {
+						log.Printf("pending WIN retry failed: %v", err)
+					}
+					if count == 50 {
+						continue
+					}
+					select {
+					case <-workerContext.Done():
+						return
+					case <-ticker.C:
+					}
+				}
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			if cancel == nil {
+				return nil
+			}
+			cancel()
+			select {
+			case <-done:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
 }
 
 type appConfig struct {
