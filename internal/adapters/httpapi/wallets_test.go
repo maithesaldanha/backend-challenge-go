@@ -9,12 +9,35 @@ import (
 	"testing"
 
 	"github.com/junglegaming/backend-challenge-go/internal/application/ports"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
 )
 
 type authenticatorFunc func(context.Context, string) (ports.Principal, error)
 
 func (f authenticatorFunc) Authenticate(ctx context.Context, token string) (ports.Principal, error) {
 	return f(ctx, token)
+}
+
+func TestRoutesExposeBoundedHTTPMetrics(t *testing.T) {
+	metrics := observability.NewMetrics()
+	handler := (&Handler{metrics: metrics}).Routes()
+	request := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("liveness status = %d, want %d", response.Code, http.StatusOK)
+	}
+
+	metricsRequest := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(metricsResponse, metricsRequest)
+	body := metricsResponse.Body.String()
+	if !strings.Contains(body, `http_requests_total{method="GET",route="GET /health/live",status="200"} 1`) {
+		t.Fatalf("metrics response is missing health request counter:\n%s", body)
+	}
+	if !strings.Contains(body, "http_request_duration_seconds_count 1") {
+		t.Fatalf("metrics response is missing request duration:\n%s", body)
+	}
 }
 
 func TestProtectedWalletRouteRejectsMissingInvalidAndInsufficientAuthentication(t *testing.T) {

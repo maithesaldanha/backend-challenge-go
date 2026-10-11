@@ -24,6 +24,7 @@ import (
 	"github.com/junglegaming/backend-challenge-go/internal/domain/money"
 	domainwager "github.com/junglegaming/backend-challenge-go/internal/domain/wager"
 	"github.com/junglegaming/backend-challenge-go/internal/domain/wallet"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
 )
 
 type Handler struct {
@@ -38,6 +39,7 @@ type Handler struct {
 	reconcileWallet           *applicationwallet.ReconcileWallet
 	readiness                 *applicationhealth.Readiness
 	auth                      ports.Authenticator
+	metrics                   *observability.Metrics
 	reconciliationDivergences atomic.Uint64
 }
 
@@ -120,11 +122,11 @@ type wagerResponse struct {
 	IdempotentReplay bool         `json:"idempotentReplay"`
 }
 
-func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal, readWallet *applicationwallet.ReadWallet, readLedger *applicationwallet.ReadWalletLedger, readTransaction *applicationwager.ReadTransaction, reconcileWallet *applicationwallet.ReconcileWallet, readiness *applicationhealth.Readiness, authenticator ports.Authenticator) (*Handler, error) {
+func NewHandler(openWallet *applicationwallet.OpenWallet, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal, readWallet *applicationwallet.ReadWallet, readLedger *applicationwallet.ReadWalletLedger, readTransaction *applicationwager.ReadTransaction, reconcileWallet *applicationwallet.ReconcileWallet, readiness *applicationhealth.Readiness, authenticator ports.Authenticator, metrics *observability.Metrics) (*Handler, error) {
 	if openWallet == nil || processBet == nil || processLoss == nil || processWin == nil || processReversal == nil || readWallet == nil || readLedger == nil || readTransaction == nil || reconcileWallet == nil || readiness == nil || authenticator == nil {
 		return nil, errors.New("wallet and wager use cases and authenticator are required")
 	}
-	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, processReversal: processReversal, readWallet: readWallet, readLedger: readLedger, readTransaction: readTransaction, reconcileWallet: reconcileWallet, readiness: readiness, auth: authenticator}, nil
+	return &Handler{openWallet: openWallet, processBet: processBet, processLoss: processLoss, processWin: processWin, processReversal: processReversal, readWallet: readWallet, readLedger: readLedger, readTransaction: readTransaction, reconcileWallet: reconcileWallet, readiness: readiness, auth: authenticator, metrics: metrics}, nil
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -139,7 +141,40 @@ func (h *Handler) Routes() http.Handler {
 	mux.Handle("GET /metrics", http.HandlerFunc(h.metricsEndpoint))
 	mux.Handle("GET /health/live", http.HandlerFunc(h.livenessEndpoint))
 	mux.Handle("GET /health/ready", http.HandlerFunc(h.readinessEndpoint))
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		response := &statusResponseWriter{ResponseWriter: w}
+		mux.ServeHTTP(response, r)
+		status := response.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		h.metrics.ObserveHTTPRequest(r.Method, r.Pattern, status, time.Since(startedAt))
+	})
+}
+
+type statusResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusResponseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusResponseWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *statusResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func (h *Handler) livenessEndpoint(w http.ResponseWriter, _ *http.Request) {
@@ -194,10 +229,7 @@ func (h *Handler) reconcileWalletEndpoint(w http.ResponseWriter, r *http.Request
 	}
 	if !result.Consistent {
 		h.reconciliationDivergences.Add(1)
-		stored, _ := result.StoredBalance.String()
-		calculated, _ := result.CalculatedBalance.String()
-		difference, _ := result.Difference.String()
-		slog.Error("wallet reconciliation divergence", "wallet_id", result.WalletID, "stored_balance", stored, "calculated_balance", calculated, "difference", difference, "checked_entries", result.CheckedEntries)
+		slog.Error("wallet reconciliation divergence", "wallet_id", result.WalletID, "checked_entries", result.CheckedEntries)
 	}
 	writeJSON(w, http.StatusOK, reconciliationResponse{WalletID: result.WalletID, StoredBalance: result.StoredBalance, CalculatedBalance: result.CalculatedBalance, Difference: result.Difference, Consistent: result.Consistent, CheckedEntries: result.CheckedEntries})
 }
@@ -205,7 +237,7 @@ func (h *Handler) reconcileWalletEndpoint(w http.ResponseWriter, r *http.Request
 func (h *Handler) metricsEndpoint(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintf(w, "# TYPE wallet_reconciliation_divergences_total counter\nwallet_reconciliation_divergences_total %d\n", h.reconciliationDivergences.Load())
+	_, _ = fmt.Fprint(w, h.metrics.PrometheusText(h.reconciliationDivergences.Load()))
 }
 
 func (h *Handler) readWalletEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -455,9 +487,16 @@ func (h *Handler) processWagerEndpoint(w http.ResponseWriter, r *http.Request) {
 		result, err = h.processBet.Execute(r.Context(), command)
 	}
 	if err != nil {
-		writeWagerError(w, err)
+		if errors.Is(err, ports.ErrConflict) || errors.Is(err, applicationwager.ErrRequestConflict) {
+			h.metrics.ObserveIdempotencyConflict()
+		}
+		if errors.Is(err, ports.ErrOptimisticLock) {
+			h.metrics.ObserveConcurrencyConflict()
+		}
+		writeWagerError(w, principal.ProviderID, command.WalletID, command.ExternalTransactionID, err)
 		return
 	}
+	h.metrics.ObserveWager(string(result.Transaction.Status()), result.IdempotentReplay)
 	response := wagerResponse{
 		TransactionID:    result.Transaction.ID(),
 		Status:           string(result.Transaction.Status()),
@@ -531,7 +570,7 @@ func writeOpenWalletError(w http.ResponseWriter, err error) {
 	}
 }
 
-func writeWagerError(w http.ResponseWriter, err error) {
+func writeWagerError(w http.ResponseWriter, providerID, walletID, externalTransactionID string, err error) {
 	switch {
 	case errors.Is(err, ports.ErrUnavailable):
 		w.Header().Set("Retry-After", "1")
@@ -548,9 +587,9 @@ func writeWagerError(w http.ResponseWriter, err error) {
 	default:
 		var postgresError *pgconn.PgError
 		if errors.As(err, &postgresError) {
-			slog.Error("wager processing failed", "sqlstate", postgresError.Code, "constraint", postgresError.ConstraintName, "message", postgresError.Message)
+			slog.Error("wager processing failed", "provider_id", providerID, "wallet_id", walletID, "external_transaction_id", externalTransactionID, "sqlstate", postgresError.Code, "constraint", postgresError.ConstraintName)
 		} else {
-			slog.Error("wager processing failed", "error", err.Error())
+			slog.Error("wager processing failed", "provider_id", providerID, "wallet_id", walletID, "external_transaction_id", externalTransactionID, "error", err.Error())
 		}
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal_error"})
 	}

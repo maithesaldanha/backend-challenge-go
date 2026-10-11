@@ -78,6 +78,14 @@ func TestSQSConsumerInboxAndWagerAreIdempotentAndAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open test wallet: %v", err)
 	}
+	for _, query := range []string{
+		`UPDATE wallet_ledger_entries SET amount_minor = amount_minor WHERE wallet_id = $1`,
+		`DELETE FROM wallet_ledger_entries WHERE wallet_id = $1`,
+	} {
+		if _, err := db.ExecContext(ctx, query, opened.Wallet.ID()); err == nil {
+			t.Fatalf("ledger mutation unexpectedly succeeded: %s", query)
+		}
+	}
 	processBet, err := applicationwager.NewProcessBet(transactor, newID, now)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +123,7 @@ func TestSQSConsumerInboxAndWagerAreIdempotentAndAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const deliveries = 8
+	const deliveries = 50
 	errorsByDelivery := make([]error, deliveries)
 	var workers sync.WaitGroup
 	for i := 0; i < deliveries; i++ {

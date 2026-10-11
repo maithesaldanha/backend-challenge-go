@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -20,18 +20,21 @@ import (
 	applicationsqs "github.com/junglegaming/backend-challenge-go/internal/application/sqsconsumer"
 	applicationwager "github.com/junglegaming/backend-challenge-go/internal/application/wager"
 	applicationwallet "github.com/junglegaming/backend-challenge-go/internal/application/wallet"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
 	"go.uber.org/fx"
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	config, err := loadConfig()
 	if err != nil {
-		log.Printf("invalid configuration: %v", err)
+		slog.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
 	options := []fx.Option{
 		postgres.Module(config.postgres),
 		fx.Supply(config.sqs),
+		fx.Provide(observability.NewMetrics),
 		auth.Module(config.keycloak),
 		httpapi.Module(config.http),
 		fx.Provide(
@@ -90,8 +93,8 @@ func main() {
 				func(database *postgres.HealthChecker, queue *awssqs.Client) (*applicationhealth.Readiness, error) {
 					return applicationhealth.NewReadiness(database, queue)
 				},
-				func(transactor ports.Transactor, publisher applicationoutbox.Publisher) (*applicationoutbox.Dispatcher, error) {
-					return applicationoutbox.NewDispatcher(transactor, publisher, func() time.Time { return time.Now().UTC() })
+				func(transactor ports.Transactor, publisher applicationoutbox.Publisher, metrics *observability.Metrics) (*applicationoutbox.Dispatcher, error) {
+					return applicationoutbox.NewDispatcher(transactor, publisher, func() time.Time { return time.Now().UTC() }, metrics)
 				},
 				func(transactor ports.Transactor, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal) (*applicationsqs.Consumer, error) {
 					return applicationsqs.New(transactor, processBet, processLoss, processWin, processReversal, func() time.Time { return time.Now().UTC() })
@@ -107,7 +110,7 @@ func main() {
 	}
 	app := fx.New(options...)
 	if err := app.Err(); err != nil {
-		log.Printf("application setup failed: %v", err)
+		slog.Error("application setup failed", "error", err)
 		os.Exit(1)
 	}
 	app.Run()
@@ -128,7 +131,7 @@ func registerOutboxPublisherWorker(lifecycle fx.Lifecycle, dispatcher *applicati
 				for {
 					worked, err := dispatcher.ProcessOne(workerContext)
 					if err != nil {
-						log.Printf("outbox publish attempt failed: %v", err)
+						slog.Error("outbox publish attempt failed", "error", err)
 					}
 					if worked {
 						continue
@@ -157,7 +160,7 @@ func registerOutboxPublisherWorker(lifecycle fx.Lifecycle, dispatcher *applicati
 	})
 }
 
-func registerSQSConsumerWorker(lifecycle fx.Lifecycle, queue *awssqs.Client, consumer *applicationsqs.Consumer) {
+func registerSQSConsumerWorker(lifecycle fx.Lifecycle, queue *awssqs.Client, consumer *applicationsqs.Consumer, metrics *observability.Metrics) {
 	var cancel context.CancelFunc
 	var done chan struct{}
 	lifecycle.Append(fx.Hook{
@@ -173,7 +176,7 @@ func registerSQSConsumerWorker(lifecycle fx.Lifecycle, queue *awssqs.Client, con
 						if workerContext.Err() != nil {
 							return
 						}
-						log.Printf("SQS receive failed: %v", err)
+						slog.Error("SQS receive failed", "error", err)
 						select {
 						case <-workerContext.Done():
 							return
@@ -181,17 +184,35 @@ func registerSQSConsumerWorker(lifecycle fx.Lifecycle, queue *awssqs.Client, con
 						}
 						continue
 					}
+					dlqContext, dlqCancel := context.WithTimeout(workerContext, 2*time.Second)
+					if depth, depthErr := queue.DLQDepth(dlqContext); depthErr != nil {
+						slog.Error("SQS dead-letter queue depth query failed", "error", depthErr)
+					} else {
+						metrics.ObserveSQSDLQDepth(depth)
+					}
+					dlqCancel()
 					for _, message := range messages {
 						if err := consumer.Handle(workerContext, message.Body); err != nil {
-							log.Printf("SQS message processing failed message_id=%q error=%v", message.ID, err)
+							if workerContext.Err() != nil {
+								releaseContext, releaseCancel := context.WithTimeout(context.WithoutCancel(workerContext), 2*time.Second)
+								if releaseErr := queue.Release(releaseContext, message.ReceiptHandle); releaseErr != nil {
+									slog.Error("SQS message release failed during shutdown", "message_id", message.ID, "error", releaseErr)
+								}
+								releaseCancel()
+								return
+							}
+							metrics.ObserveSQSRetry()
+							slog.Error("SQS message processing failed", "message_id", message.ID, "receive_count", message.ReceiveCount, "error", err)
 							if retryErr := queue.Retry(workerContext, message.ReceiptHandle, message.ReceiveCount); retryErr != nil && workerContext.Err() == nil {
-								log.Printf("SQS retry scheduling failed message_id=%q error=%v", message.ID, retryErr)
+								slog.Error("SQS retry scheduling failed", "message_id", message.ID, "error", retryErr)
 							}
 							continue
 						}
-						if err := queue.Delete(workerContext, message.ReceiptHandle); err != nil {
-							log.Printf("SQS message deletion failed message_id=%q error=%v", message.ID, err)
+						deleteContext, deleteCancel := context.WithTimeout(context.WithoutCancel(workerContext), 2*time.Second)
+						if err := queue.Delete(deleteContext, message.ReceiptHandle); err != nil {
+							slog.Error("SQS message deletion failed", "message_id", message.ID, "error", err)
 						}
+						deleteCancel()
 					}
 				}
 			}()
@@ -227,7 +248,7 @@ func registerReferenceRetryWorker(lifecycle fx.Lifecycle, processor *application
 				for {
 					count, err := processor.ProcessBatch(workerContext, 50)
 					if err != nil {
-						log.Printf("pending reference retry failed: %v", err)
+						slog.Error("pending reference retry failed", "error", err)
 					}
 					if count == 50 {
 						continue
@@ -290,6 +311,10 @@ func loadConfig() (appConfig, error) {
 	if sqsEnabled && inputQueueURL == "" {
 		return appConfig{}, fmt.Errorf("SQS_INPUT_QUEUE_URL is required when SQS_ENABLED=true")
 	}
+	dlqQueueURL := strings.TrimSpace(os.Getenv("SQS_DLQ_QUEUE_URL"))
+	if sqsEnabled && dlqQueueURL == "" {
+		return appConfig{}, fmt.Errorf("SQS_DLQ_QUEUE_URL is required when SQS_ENABLED=true")
+	}
 	region := strings.TrimSpace(os.Getenv("AWS_REGION"))
 	if region == "" {
 		region = "us-east-1"
@@ -305,7 +330,7 @@ func loadConfig() (appConfig, error) {
 		http:     httpapi.ServerConfig{Address: address},
 		sqs: awssqs.Config{
 			Region: region, Endpoint: sqsEndpoint, QueueURL: queueURL,
-			InputQueueURL: inputQueueURL,
+			InputQueueURL: inputQueueURL, DLQQueueURL: dlqQueueURL,
 		},
 		sqsEnabled: sqsEnabled,
 	}, nil

@@ -7,6 +7,7 @@ import (
 
 	"github.com/junglegaming/backend-challenge-go/internal/application/events"
 	"github.com/junglegaming/backend-challenge-go/internal/application/ports"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
 )
 
 var ErrInvalidDependencies = errors.New("invalid outbox dispatcher dependencies")
@@ -20,13 +21,18 @@ type Dispatcher struct {
 	publisher     Publisher
 	now           func() time.Time
 	leaseDuration time.Duration
+	metrics       *observability.Metrics
 }
 
-func NewDispatcher(transactor ports.Transactor, publisher Publisher, now func() time.Time) (*Dispatcher, error) {
-	if transactor == nil || publisher == nil || now == nil {
+func NewDispatcher(transactor ports.Transactor, publisher Publisher, now func() time.Time, metrics ...*observability.Metrics) (*Dispatcher, error) {
+	if transactor == nil || publisher == nil || now == nil || len(metrics) > 1 {
 		return nil, ErrInvalidDependencies
 	}
-	return &Dispatcher{transactor: transactor, publisher: publisher, now: now, leaseDuration: 30 * time.Second}, nil
+	var collector *observability.Metrics
+	if len(metrics) == 1 {
+		collector = metrics[0]
+	}
+	return &Dispatcher{transactor: transactor, publisher: publisher, now: now, leaseDuration: 30 * time.Second, metrics: collector}, nil
 }
 
 func (d *Dispatcher) ProcessOne(ctx context.Context) (bool, error) {
@@ -44,11 +50,13 @@ func (d *Dispatcher) ProcessOne(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	d.metrics.ObserveOutboxPublishLag(d.now().UTC().Sub(record.Event.OccurredAt))
 
 	publishCtx, cancelPublish := context.WithTimeout(ctx, 10*time.Second)
 	publishErr := d.publisher.Publish(publishCtx, record.Event)
 	cancelPublish()
 	if publishErr != nil {
+		d.metrics.ObserveOutboxRetry()
 		retryAt := d.now().UTC().Add(outboxBackoff(record.Attempts))
 		updateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()

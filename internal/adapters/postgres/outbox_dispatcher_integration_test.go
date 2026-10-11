@@ -179,6 +179,50 @@ func TestOutboxDispatcherPreservesAggregateOrderWhenEventsShareTimestamp(t *test
 	assertOutboxState(t, ctx, db, second.ID, 1, true, false)
 }
 
+func TestOutboxDispatcherRecoversExpiredLeaseWithStableEventID(t *testing.T) {
+	ctx, db, transactor := newOutboxIntegrationDatabase(t)
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	event := newOutboxIntegrationEvent(now)
+	appendOutboxEvent(t, ctx, transactor, event)
+	var abandoned events.OutboxRecord
+	err := transactor.WithinTransaction(ctx, func(txctx context.Context, unit ports.UnitOfWork) error {
+		var err error
+		abandoned, err = unit.Outbox().ClaimDue(txctx, now, now.Add(30*time.Second))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("claim event before simulated publisher interruption: %v", err)
+	}
+	if abandoned.Event.ID != event.ID {
+		t.Fatalf("claimed event ID = %s, want %s", abandoned.Event.ID, event.ID)
+	}
+	assertOutboxState(t, ctx, db, event.ID, 1, false, true)
+
+	currentTime := now
+	var republishedID string
+	publisher := publisherFunc(func(_ context.Context, event events.Event) error {
+		republishedID = event.ID
+		return nil
+	})
+	dispatcher, err := outbox.NewDispatcher(transactor, publisher, func() time.Time { return currentTime })
+	if err != nil {
+		t.Fatal(err)
+	}
+	worked, err := dispatcher.ProcessOne(ctx)
+	if err != nil || worked {
+		t.Fatalf("ProcessOne() before lease expiry = (%t, %v), want (false, nil)", worked, err)
+	}
+	currentTime = now.Add(31 * time.Second)
+	worked, err = dispatcher.ProcessOne(ctx)
+	if err != nil || !worked {
+		t.Fatalf("ProcessOne() after lease expiry = (%t, %v), want (true, nil)", worked, err)
+	}
+	if republishedID != abandoned.Event.ID {
+		t.Fatalf("republished event ID = %s, want stable ID %s", republishedID, abandoned.Event.ID)
+	}
+	assertOutboxState(t, ctx, db, event.ID, 2, true, false)
+}
+
 type publisherFunc func(context.Context, events.Event) error
 
 func (f publisherFunc) Publish(ctx context.Context, event events.Event) error {

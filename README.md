@@ -6,7 +6,7 @@ API de carteiras e transações de apostas com PostgreSQL, autenticação OIDC v
 
 O repositório contém o domínio de dinheiro, carteiras e transações; casos de uso para abertura e leitura de carteiras, apostas, ganhos, perdas e reversões; adapters HTTP, PostgreSQL, Keycloak e SQS; migrations; publisher outbox; e consumidor SQS.
 
-A cobertura atual inclui testes unitários de domínio e aplicação, testes do dispatcher outbox, testes HTTP de autorização e isolamento de provider, testes do consumidor e testes PostgreSQL de idempotência/atomicidade, concorrência entre três processos, exclusão de claims concorrentes, retry após backoff e ordenação de eventos por agregado. Ainda faltam testes ponta a ponta com Keycloak, HTTP e PostgreSQL, testes com um broker SQS real, falhas controladas de publisher/consumer, reinicialização e vários cenários de recuperação descritos em [ARCHITECTURE.md](ARCHITECTURE.md). Os testes de integração PostgreSQL precisam de `TEST_DATABASE_URL` para rodar; sem essa variável, eles são ignorados.
+A cobertura atual inclui testes unitários de domínio e aplicação, testes HTTP de autorização e isolamento de provider, testes do consumidor, 50 entregas concorrentes da mesma mensagem com PostgreSQL, concorrência entre três processos, integração entre caso de uso e consumidor SQS, claims concorrentes da outbox, retry, recuperação de lease expirado e ordenação de eventos. A integração com Keycloak e um broker SQS real ainda precisa ser validada no ambiente Docker. Os testes PostgreSQL exigem `TEST_DATABASE_URL`; sem ela, são ignorados.
 
 O enunciado completo está em [CHALLENGE.md](CHALLENGE.md). As decisões e limitações técnicas estão em [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -51,7 +51,7 @@ Aguarde PostgreSQL e Keycloak ficarem saudáveis e a API iniciar. Endereços loc
 | PostgreSQL | `localhost:5433` |
 | Keycloak | `http://localhost:8081` |
 
-Nesse modo, a API grava eventos na outbox PostgreSQL, mas não os publica. `/health/ready` verifica PostgreSQL. A migration `000001_init.up.sql` é aplicada automaticamente quando o volume do banco é criado vazio. As migrations `000002_wallet_ledger_read_index.up.sql` e `000003_outbox_sequence.up.sql` devem ser aplicadas manualmente quando necessárias.
+Nesse modo, a API grava eventos na outbox PostgreSQL, mas não os publica. `/health/ready` verifica PostgreSQL. As migrations `000001`, `000002` e `000003` são aplicadas automaticamente quando o volume do banco é criado vazio. Para volumes existentes, aplique manualmente as migrations que ainda não foram executadas.
 
 Para parar os serviços preservando os dados:
 
@@ -110,6 +110,8 @@ O mesmo corpo e a mesma chave devem devolver o resultado persistido como replay 
 
 O ledger aceita `limit` de 1 a 100 (padrão 50) e devolve `nextCursor` opaco. A reconciliação compara o saldo com os lançamentos do ledger e não altera a carteira.
 
+`GET /metrics` expõe métricas Prometheus para requisições HTTP, resultados e replays de apostas, conflitos, retries de SQS/outbox, profundidade aproximada da DLQ, atraso observado da outbox e divergências de reconciliação.
+
 ## Migrations
 
 A migration inicial é automática apenas para volume vazio. Para atualizar um banco existente, aplique migrations pendentes na ordem. Execute **um comando por vez**, conforme a operação desejada.
@@ -167,6 +169,12 @@ Outras verificações:
 go test -race ./...
 go vet ./...
 go build ./...
+```
+
+Para executar os testes de integração do dispatcher outbox isoladamente:
+
+```powershell
+go test ./internal/adapters/postgres -run 'TestOutboxDispatcher' -count=1 -v
 ```
 
 No Windows, o Controle de Aplicativo pode bloquear executáveis temporários gerados pelo `go test`. Se isso ocorrer, o teste correspondente não foi executado; não significa que passou ou falhou. Não desative a política de segurança. As verificações `go vet` e `go build` não imprimem nada quando terminam com sucesso.

@@ -21,12 +21,14 @@ type Config struct {
 	Endpoint      string
 	QueueURL      string
 	InputQueueURL string
+	DLQQueueURL   string
 }
 
 type Client struct {
 	api           sqsAPI
 	queueURL      string
 	inputQueueURL string
+	dlqQueueURL   string
 }
 
 type sqsAPI interface {
@@ -56,7 +58,7 @@ type envelope struct {
 }
 
 func New(config Config) (*Client, error) {
-	if strings.TrimSpace(config.Region) == "" || strings.TrimSpace(config.QueueURL) == "" || strings.TrimSpace(config.InputQueueURL) == "" {
+	if strings.TrimSpace(config.Region) == "" || strings.TrimSpace(config.QueueURL) == "" || strings.TrimSpace(config.InputQueueURL) == "" || strings.TrimSpace(config.DLQQueueURL) == "" {
 		return nil, ErrInvalidConfig
 	}
 	awsConfig, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(config.Region))
@@ -68,7 +70,7 @@ func New(config Config) (*Client, error) {
 			options.BaseEndpoint = aws.String(strings.TrimSpace(config.Endpoint))
 		}
 	})
-	return &Client{api: client, queueURL: strings.TrimSpace(config.QueueURL), inputQueueURL: strings.TrimSpace(config.InputQueueURL)}, nil
+	return &Client{api: client, queueURL: strings.TrimSpace(config.QueueURL), inputQueueURL: strings.TrimSpace(config.InputQueueURL), dlqQueueURL: strings.TrimSpace(config.DLQQueueURL)}, nil
 }
 
 func (c *Client) Publish(ctx context.Context, event events.Event) error {
@@ -97,7 +99,7 @@ func (c *Client) Publish(ctx context.Context, event events.Event) error {
 func (c *Client) Name() string { return "sqs" }
 
 func (c *Client) Check(ctx context.Context) error {
-	for _, queueURL := range []string{c.queueURL, c.inputQueueURL} {
+	for _, queueURL := range []string{c.queueURL, c.inputQueueURL, c.dlqQueueURL} {
 		_, err := c.api.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       aws.String(queueURL),
 			AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
@@ -107,6 +109,21 @@ func (c *Client) Check(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (c *Client) DLQDepth(ctx context.Context) (int64, error) {
+	output, err := c.api.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       aws.String(c.dlqQueueURL),
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameApproximateNumberOfMessages},
+	})
+	if err != nil {
+		return 0, err
+	}
+	depth, err := strconv.ParseInt(output.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return depth, nil
 }
 
 func (c *Client) Receive(ctx context.Context) ([]ReceivedMessage, error) {
@@ -160,6 +177,15 @@ func (c *Client) Retry(ctx context.Context, receiptHandle string, receiveCount i
 		QueueUrl:          aws.String(c.inputQueueURL),
 		ReceiptHandle:     aws.String(receiptHandle),
 		VisibilityTimeout: int32(visibilitySeconds),
+	})
+	return err
+}
+
+func (c *Client) Release(ctx context.Context, receiptHandle string) error {
+	_, err := c.api.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+		QueueUrl:          aws.String(c.inputQueueURL),
+		ReceiptHandle:     aws.String(receiptHandle),
+		VisibilityTimeout: 0,
 	})
 	return err
 }

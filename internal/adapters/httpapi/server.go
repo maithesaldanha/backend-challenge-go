@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -91,7 +91,7 @@ func (s *Server) start(context.Context) error {
 	go func() {
 		err := s.httpServer.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("http server stopped unexpectedly: %v", err)
+			slog.Error("http server stopped unexpectedly", "error", err)
 		}
 	}()
 	return nil
