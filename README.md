@@ -6,7 +6,7 @@ API de carteiras e transações de apostas com PostgreSQL, autenticação OIDC v
 
 O repositório contém o domínio de dinheiro, carteiras e transações; casos de uso para abertura e leitura de carteiras, apostas, ganhos, perdas e reversões; adapters HTTP, PostgreSQL, Keycloak e SQS; migrations; publisher outbox; e consumidor SQS.
 
-A cobertura atual inclui testes unitários de domínio e aplicação, testes do consumidor e testes PostgreSQL de idempotência/atomicidade e concorrência entre três processos. Ainda faltam testes ponta a ponta com Keycloak e HTTP, testes com um broker SQS real, falhas controladas de publisher/consumer, reinicialização e vários cenários de recuperação descritos em [ARCHITECTURE.md](ARCHITECTURE.md). Os testes de integração PostgreSQL precisam de `TEST_DATABASE_URL` para rodar; sem essa variável, eles são ignorados.
+A cobertura atual inclui testes unitários de domínio e aplicação, testes do dispatcher outbox, testes HTTP de autorização e isolamento de provider, testes do consumidor e testes PostgreSQL de idempotência/atomicidade e concorrência entre três processos. Ainda faltam testes ponta a ponta com Keycloak, HTTP e PostgreSQL, testes com um broker SQS real, falhas controladas de publisher/consumer, reinicialização e vários cenários de recuperação descritos em [ARCHITECTURE.md](ARCHITECTURE.md). Os testes de integração PostgreSQL precisam de `TEST_DATABASE_URL` para rodar; sem essa variável, eles são ignorados.
 
 O enunciado completo está em [CHALLENGE.md](CHALLENGE.md). As decisões e limitações técnicas estão em [ARCHITECTURE.md](ARCHITECTURE.md).
 
