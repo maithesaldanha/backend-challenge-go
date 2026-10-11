@@ -127,6 +127,11 @@ func decodeMessage(body []byte) (messageEnvelope, wager.WagerCommand, domainwage
 	} else {
 		kind = domainwager.Kind(message.Data.Kind)
 	}
+	switch kind {
+	case domainwager.Bet, domainwager.Win, domainwager.Loss, domainwager.Refund, domainwager.Rollback:
+	default:
+		return messageEnvelope{}, wager.WagerCommand{}, "", ErrInvalidMessage
+	}
 	var amount struct {
 		Amount   string `json:"amount"`
 		Currency string `json:"currency"`
