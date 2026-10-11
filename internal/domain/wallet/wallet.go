@@ -162,7 +162,10 @@ func RehydrateLedgerEntry(id, walletID, transactionID string, direction Directio
 		return LedgerEntry{}, err
 	}
 	comparison, err := expected.Compare(after)
-	if err != nil || comparison != 0 {
+	if err != nil {
+		return LedgerEntry{}, err
+	}
+	if comparison != 0 {
 		return LedgerEntry{}, ErrInvalidMovement
 	}
 	return LedgerEntry{id: id, walletID: walletID, transactionID: transactionID, direction: direction, money: amount, balanceBefore: before, balanceAfter: after, createdAt: createdAt}, nil

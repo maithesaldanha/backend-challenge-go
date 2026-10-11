@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+
+	isocurrency "golang.org/x/text/currency"
 )
 
 var (
@@ -284,5 +286,6 @@ func validCurrency(currency string) bool {
 			return false
 		}
 	}
-	return true
+	_, err := isocurrency.ParseISO(currency)
+	return err == nil
 }
