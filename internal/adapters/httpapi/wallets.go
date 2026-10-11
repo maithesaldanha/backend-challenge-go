@@ -2,9 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,18 +110,6 @@ type wagerRequest struct {
 	GameID                         string      `json:"gameId"`
 	ReferenceExternalTransactionID string      `json:"referenceExternalTransactionId,omitempty"`
 	Money                          money.Money `json:"money"`
-}
-
-type wagerHashPayload struct {
-	ExternalTransactionID          string      `json:"externalTransactionId"`
-	GameID                         string      `json:"gameId"`
-	Kind                           string      `json:"kind"`
-	Money                          money.Money `json:"money"`
-	PlayerID                       string      `json:"playerId"`
-	ProviderID                     string      `json:"providerId"`
-	ReferenceExternalTransactionID string      `json:"referenceExternalTransactionId,omitempty"`
-	RoundID                        string      `json:"roundId"`
-	WalletID                       string      `json:"walletId"`
 }
 
 type wagerResponse struct {
@@ -441,27 +427,10 @@ func (h *Handler) processWagerEndpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "unsupported_transaction_kind"})
 		return
 	}
-	payload, err := json.Marshal(wagerHashPayload{
-		ProviderID:                     principal.ProviderID,
-		ExternalTransactionID:          request.ExternalTransactionID,
-		PlayerID:                       request.PlayerID,
-		WalletID:                       request.WalletID,
-		RoundID:                        request.RoundID,
-		GameID:                         request.GameID,
-		Kind:                           kind,
-		Money:                          request.Money,
-		ReferenceExternalTransactionID: request.ReferenceExternalTransactionID,
-	})
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
-		return
-	}
-	hash := sha256.Sum256(payload)
 	command := applicationwager.WagerCommand{
 		ProviderID:                     principal.ProviderID,
 		ExternalTransactionID:          request.ExternalTransactionID,
 		IdempotencyKey:                 idempotencyKey,
-		PayloadHash:                    hex.EncodeToString(hash[:]),
 		WalletID:                       request.WalletID,
 		PlayerID:                       request.PlayerID,
 		RoundID:                        request.RoundID,
@@ -469,6 +438,12 @@ func (h *Handler) processWagerEndpoint(w http.ResponseWriter, r *http.Request) {
 		Money:                          request.Money,
 		ReferenceExternalTransactionID: request.ReferenceExternalTransactionID,
 	}
+	hash, err := applicationwager.PayloadHash(command, kind)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_request"})
+		return
+	}
+	command.PayloadHash = hash
 	var result applicationwager.WagerResult
 	if kind == string(domainwager.Loss) {
 		result, err = h.processLoss.Execute(r.Context(), command)

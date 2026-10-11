@@ -2,6 +2,9 @@ package wager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -46,6 +49,37 @@ type BetResult = WagerResult
 type LossResult = WagerResult
 type WinResult = WagerResult
 type ReversalResult = WagerResult
+
+type payloadHashFields struct {
+	ExternalTransactionID          string      `json:"externalTransactionId"`
+	GameID                         string      `json:"gameId"`
+	Kind                           string      `json:"kind"`
+	Money                          money.Money `json:"money"`
+	PlayerID                       string      `json:"playerId"`
+	ProviderID                     string      `json:"providerId"`
+	ReferenceExternalTransactionID string      `json:"referenceExternalTransactionId,omitempty"`
+	RoundID                        string      `json:"roundId"`
+	WalletID                       string      `json:"walletId"`
+}
+
+func PayloadHash(command WagerCommand, kind string) (string, error) {
+	payload, err := json.Marshal(payloadHashFields{
+		ExternalTransactionID:          command.ExternalTransactionID,
+		GameID:                         command.GameID,
+		Kind:                           kind,
+		Money:                          command.Money,
+		PlayerID:                       command.PlayerID,
+		ProviderID:                     command.ProviderID,
+		ReferenceExternalTransactionID: command.ReferenceExternalTransactionID,
+		RoundID:                        command.RoundID,
+		WalletID:                       command.WalletID,
+	})
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(payload)
+	return hex.EncodeToString(hash[:]), nil
+}
 
 type ProcessBet struct {
 	transactor ports.Transactor

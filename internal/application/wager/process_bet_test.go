@@ -150,6 +150,7 @@ func (u *memoryUnit) Wallets() ports.WalletRepository { return u.wallets }
 func (u *memoryUnit) Wagers() ports.WagerRepository   { return u.wagers }
 func (u *memoryUnit) Ledger() ports.LedgerRepository  { return u.ledger }
 func (u *memoryUnit) Outbox() ports.OutboxRepository  { return u.outbox }
+func (u *memoryUnit) Inbox() ports.InboxRepository    { return nil }
 
 type memoryWallets struct{ account domainwallet.Wallet }
 

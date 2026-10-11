@@ -20,6 +20,7 @@ type unitOfWork struct {
 	wagers  wagerRepository
 	ledger  ledgerRepository
 	outbox  outboxRepository
+	inbox   inboxRepository
 }
 
 func newUnitOfWork(tx *sql.Tx) *unitOfWork {
@@ -28,6 +29,7 @@ func newUnitOfWork(tx *sql.Tx) *unitOfWork {
 		wagers:  wagerRepository{tx: tx},
 		ledger:  ledgerRepository{tx: tx},
 		outbox:  outboxRepository{tx: tx},
+		inbox:   inboxRepository{tx: tx},
 	}
 }
 
@@ -35,6 +37,51 @@ func (u *unitOfWork) Wallets() ports.WalletRepository { return u.wallets }
 func (u *unitOfWork) Wagers() ports.WagerRepository   { return u.wagers }
 func (u *unitOfWork) Ledger() ports.LedgerRepository  { return u.ledger }
 func (u *unitOfWork) Outbox() ports.OutboxRepository  { return u.outbox }
+func (u *unitOfWork) Inbox() ports.InboxRepository    { return u.inbox }
+
+type inboxRepository struct{ tx *sql.Tx }
+
+func (r inboxRepository) Register(ctx context.Context, consumerName, messageID, messageHash string, receivedAt time.Time) (bool, error) {
+	_, err := r.tx.ExecContext(ctx, `
+		INSERT INTO consumer_inbox (consumer_name, message_id, message_hash, received_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (consumer_name, message_id) DO NOTHING`, consumerName, messageID, messageHash, receivedAt)
+	if err != nil {
+		return false, mapError(err)
+	}
+	var storedHash string
+	var completedAt sql.NullTime
+	err = r.tx.QueryRowContext(ctx, `
+		SELECT message_hash, completed_at
+		FROM consumer_inbox
+		WHERE consumer_name = $1 AND message_id = $2
+		FOR UPDATE`, consumerName, messageID).Scan(&storedHash, &completedAt)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if storedHash != messageHash {
+		return false, ports.ErrConflict
+	}
+	return completedAt.Valid, nil
+}
+
+func (r inboxRepository) Complete(ctx context.Context, consumerName, messageID string, completedAt time.Time) error {
+	result, err := r.tx.ExecContext(ctx, `
+		UPDATE consumer_inbox
+		SET completed_at = $3
+		WHERE consumer_name = $1 AND message_id = $2 AND completed_at IS NULL`, consumerName, messageID, completedAt)
+	if err != nil {
+		return mapError(err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return mapError(err)
+	}
+	if rows == 0 {
+		return ports.ErrConflict
+	}
+	return nil
+}
 
 type walletRepository struct{ tx *sql.Tx }
 

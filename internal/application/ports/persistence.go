@@ -32,6 +32,12 @@ type UnitOfWork interface {
 	Wagers() WagerRepository
 	Ledger() LedgerRepository
 	Outbox() OutboxRepository
+	Inbox() InboxRepository
+}
+
+type InboxRepository interface {
+	Register(context.Context, string, string, string, time.Time) (bool, error)
+	Complete(context.Context, string, string, time.Time) error
 }
 
 type WalletRepository interface {

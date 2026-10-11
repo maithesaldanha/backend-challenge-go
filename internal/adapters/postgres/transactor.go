@@ -15,6 +15,13 @@ type Transactor struct {
 	db *sql.DB
 }
 
+type transactionContextKey struct{}
+
+type transactionContext struct {
+	transactor *Transactor
+	unit       ports.UnitOfWork
+}
+
 func NewTransactor(db *sql.DB) (*Transactor, error) {
 	if db == nil {
 		return nil, errors.New("postgres database is required")
@@ -23,6 +30,9 @@ func NewTransactor(db *sql.DB) (*Transactor, error) {
 }
 
 func (t *Transactor) WithinTransaction(ctx context.Context, fn func(context.Context, ports.UnitOfWork) error) error {
+	if current, ok := ctx.Value(transactionContextKey{}).(transactionContext); ok && current.transactor == t {
+		return fn(ctx, current.unit)
+	}
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
 		return mapError(err)
@@ -30,7 +40,8 @@ func (t *Transactor) WithinTransaction(ctx context.Context, fn func(context.Cont
 	defer tx.Rollback()
 
 	unit := newUnitOfWork(tx)
-	if err := fn(ctx, unit); err != nil {
+	txctx := context.WithValue(ctx, transactionContextKey{}, transactionContext{transactor: t, unit: unit})
+	if err := fn(txctx, unit); err != nil {
 		return mapError(err)
 	}
 	if err := tx.Commit(); err != nil {

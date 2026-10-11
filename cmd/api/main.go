@@ -17,6 +17,7 @@ import (
 	applicationhealth "github.com/junglegaming/backend-challenge-go/internal/application/health"
 	applicationoutbox "github.com/junglegaming/backend-challenge-go/internal/application/outbox"
 	"github.com/junglegaming/backend-challenge-go/internal/application/ports"
+	applicationsqs "github.com/junglegaming/backend-challenge-go/internal/application/sqsconsumer"
 	applicationwager "github.com/junglegaming/backend-challenge-go/internal/application/wager"
 	applicationwallet "github.com/junglegaming/backend-challenge-go/internal/application/wallet"
 	"go.uber.org/fx"
@@ -92,8 +93,12 @@ func main() {
 				func(transactor ports.Transactor, publisher applicationoutbox.Publisher) (*applicationoutbox.Dispatcher, error) {
 					return applicationoutbox.NewDispatcher(transactor, publisher, func() time.Time { return time.Now().UTC() })
 				},
+				func(transactor ports.Transactor, processBet *applicationwager.ProcessBet, processLoss *applicationwager.ProcessLoss, processWin *applicationwager.ProcessWin, processReversal *applicationwager.ProcessReversal) (*applicationsqs.Consumer, error) {
+					return applicationsqs.New(transactor, processBet, processLoss, processWin, processReversal, func() time.Time { return time.Now().UTC() })
+				},
 			),
 			fx.Invoke(registerOutboxPublisherWorker),
+			fx.Invoke(registerSQSConsumerWorker),
 		)
 	} else {
 		options = append(options, fx.Provide(func(database *postgres.HealthChecker) (*applicationhealth.Readiness, error) {
@@ -132,6 +137,61 @@ func registerOutboxPublisherWorker(lifecycle fx.Lifecycle, dispatcher *applicati
 					case <-workerContext.Done():
 						return
 					case <-ticker.C:
+					}
+				}
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			if cancel == nil {
+				return nil
+			}
+			cancel()
+			select {
+			case <-done:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
+}
+
+func registerSQSConsumerWorker(lifecycle fx.Lifecycle, queue *awssqs.Client, consumer *applicationsqs.Consumer) {
+	var cancel context.CancelFunc
+	var done chan struct{}
+	lifecycle.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			workerContext, stop := context.WithCancel(context.Background())
+			cancel = stop
+			done = make(chan struct{})
+			go func() {
+				defer close(done)
+				for {
+					messages, err := queue.Receive(workerContext)
+					if err != nil {
+						if workerContext.Err() != nil {
+							return
+						}
+						log.Printf("SQS receive failed: %v", err)
+						select {
+						case <-workerContext.Done():
+							return
+						case <-time.After(time.Second):
+						}
+						continue
+					}
+					for _, message := range messages {
+						if err := consumer.Handle(workerContext, message.Body); err != nil {
+							log.Printf("SQS message processing failed message_id=%q error=%v", message.ID, err)
+							if retryErr := queue.Retry(workerContext, message.ReceiptHandle, message.ReceiveCount); retryErr != nil && workerContext.Err() == nil {
+								log.Printf("SQS retry scheduling failed message_id=%q error=%v", message.ID, retryErr)
+							}
+							continue
+						}
+						if err := queue.Delete(workerContext, message.ReceiptHandle); err != nil {
+							log.Printf("SQS message deletion failed message_id=%q error=%v", message.ID, err)
+						}
 					}
 				}
 			}()
@@ -226,6 +286,10 @@ func loadConfig() (appConfig, error) {
 	if sqsEnabled && queueURL == "" {
 		return appConfig{}, fmt.Errorf("SQS_QUEUE_URL is required when SQS_ENABLED=true")
 	}
+	inputQueueURL := strings.TrimSpace(os.Getenv("SQS_INPUT_QUEUE_URL"))
+	if sqsEnabled && inputQueueURL == "" {
+		return appConfig{}, fmt.Errorf("SQS_INPUT_QUEUE_URL is required when SQS_ENABLED=true")
+	}
 	region := strings.TrimSpace(os.Getenv("AWS_REGION"))
 	if region == "" {
 		region = "us-east-1"
@@ -236,10 +300,13 @@ func loadConfig() (appConfig, error) {
 		address = ":8080"
 	}
 	return appConfig{
-		postgres:   postgres.Config{DSN: databaseURL},
-		keycloak:   auth.Config{IssuerURL: issuerURL, JWKSURL: jwksURL, Audience: audience},
-		http:       httpapi.ServerConfig{Address: address},
-		sqs:        awssqs.Config{Region: region, Endpoint: sqsEndpoint, QueueURL: queueURL},
+		postgres: postgres.Config{DSN: databaseURL},
+		keycloak: auth.Config{IssuerURL: issuerURL, JWKSURL: jwksURL, Audience: audience},
+		http:     httpapi.ServerConfig{Address: address},
+		sqs: awssqs.Config{
+			Region: region, Endpoint: sqsEndpoint, QueueURL: queueURL,
+			InputQueueURL: inputQueueURL,
+		},
 		sqsEnabled: sqsEnabled,
 	}, nil
 }

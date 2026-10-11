@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,19 +17,31 @@ import (
 var ErrInvalidConfig = errors.New("invalid SQS configuration")
 
 type Config struct {
-	Region   string
-	Endpoint string
-	QueueURL string
+	Region        string
+	Endpoint      string
+	QueueURL      string
+	InputQueueURL string
 }
 
 type Client struct {
-	api      sqsAPI
-	queueURL string
+	api           sqsAPI
+	queueURL      string
+	inputQueueURL string
 }
 
 type sqsAPI interface {
 	SendMessage(context.Context, *sqs.SendMessageInput, ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
 	GetQueueAttributes(context.Context, *sqs.GetQueueAttributesInput, ...func(*sqs.Options)) (*sqs.GetQueueAttributesOutput, error)
+	ReceiveMessage(context.Context, *sqs.ReceiveMessageInput, ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
+	DeleteMessage(context.Context, *sqs.DeleteMessageInput, ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
+	ChangeMessageVisibility(context.Context, *sqs.ChangeMessageVisibilityInput, ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
+}
+
+type ReceivedMessage struct {
+	ID            string
+	ReceiptHandle string
+	Body          []byte
+	ReceiveCount  int
 }
 
 type envelope struct {
@@ -43,7 +56,7 @@ type envelope struct {
 }
 
 func New(config Config) (*Client, error) {
-	if strings.TrimSpace(config.Region) == "" || strings.TrimSpace(config.QueueURL) == "" {
+	if strings.TrimSpace(config.Region) == "" || strings.TrimSpace(config.QueueURL) == "" || strings.TrimSpace(config.InputQueueURL) == "" {
 		return nil, ErrInvalidConfig
 	}
 	awsConfig, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(config.Region))
@@ -55,7 +68,7 @@ func New(config Config) (*Client, error) {
 			options.BaseEndpoint = aws.String(strings.TrimSpace(config.Endpoint))
 		}
 	})
-	return &Client{api: client, queueURL: strings.TrimSpace(config.QueueURL)}, nil
+	return &Client{api: client, queueURL: strings.TrimSpace(config.QueueURL), inputQueueURL: strings.TrimSpace(config.InputQueueURL)}, nil
 }
 
 func (c *Client) Publish(ctx context.Context, event events.Event) error {
@@ -84,9 +97,69 @@ func (c *Client) Publish(ctx context.Context, event events.Event) error {
 func (c *Client) Name() string { return "sqs" }
 
 func (c *Client) Check(ctx context.Context) error {
-	_, err := c.api.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
-		QueueUrl:       aws.String(c.queueURL),
-		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	for _, queueURL := range []string{c.queueURL, c.inputQueueURL} {
+		_, err := c.api.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+			QueueUrl:       aws.String(queueURL),
+			AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) Receive(ctx context.Context) ([]ReceivedMessage, error) {
+	output, err := c.api.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+		QueueUrl:                    aws.String(c.inputQueueURL),
+		MaxNumberOfMessages:         1,
+		WaitTimeSeconds:             20,
+		VisibilityTimeout:           60,
+		MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameApproximateReceiveCount},
+	})
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]ReceivedMessage, 0, len(output.Messages))
+	for _, message := range output.Messages {
+		if message.ReceiptHandle == nil || message.Body == nil {
+			continue
+		}
+		id := ""
+		if message.MessageId != nil {
+			id = *message.MessageId
+		}
+		receiveCount := 1
+		if value, ok := message.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)]; ok {
+			if parsed, parseErr := strconv.Atoi(value); parseErr == nil && parsed > 0 {
+				receiveCount = parsed
+			}
+		}
+		messages = append(messages, ReceivedMessage{ID: id, ReceiptHandle: *message.ReceiptHandle, Body: []byte(*message.Body), ReceiveCount: receiveCount})
+	}
+	return messages, nil
+}
+
+func (c *Client) Delete(ctx context.Context, receiptHandle string) error {
+	_, err := c.api.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+		QueueUrl:      aws.String(c.inputQueueURL),
+		ReceiptHandle: aws.String(receiptHandle),
+	})
+	return err
+}
+
+func (c *Client) Retry(ctx context.Context, receiptHandle string, receiveCount int) error {
+	if receiveCount < 1 {
+		receiveCount = 1
+	}
+	if receiveCount > 6 {
+		receiveCount = 6
+	}
+	visibilitySeconds := 1 << uint(receiveCount-1)
+	_, err := c.api.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+		QueueUrl:          aws.String(c.inputQueueURL),
+		ReceiptHandle:     aws.String(receiptHandle),
+		VisibilityTimeout: int32(visibilitySeconds),
 	})
 	return err
 }

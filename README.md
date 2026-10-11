@@ -2,7 +2,7 @@
 
 ## Estado atual
 
-O repositório está em implementação incremental. Estão disponíveis a abertura, leitura e reconciliação de carteiras, leitura paginada do ledger, processamento e consulta de transações (`BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK`), persistência PostgreSQL, autenticação Keycloak, health checks e publicação da outbox para SQS FIFO. O consumidor SQS e testes abrangentes ainda não estão implementados.
+O repositório está em implementação incremental. Estão disponíveis a abertura, leitura e reconciliação de carteiras, leitura paginada do ledger, processamento e consulta de transações (`BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK`), persistência PostgreSQL, autenticação Keycloak, health checks, publicação da outbox e consumo de apostas por SQS FIFO. Os testes de integração abrangentes ainda não estão implementados.
 
 ## Executar localmente com Docker Compose
 
@@ -17,7 +17,7 @@ docker compose up --build
 
 O PostgreSQL fica disponível na porta `5433`, o Keycloak na `8081` e a API na `8080`. Nesse modo, a API processa e persiste operações, mas os eventos permanecem na outbox do PostgreSQL sem serem publicados; `/health/ready` verifica apenas o banco. O schema inicial é aplicado automaticamente quando o volume do PostgreSQL é criado pela primeira vez. Se já existir um volume antigo, aplique as migrations conforme a seção abaixo; `docker compose down -v` apaga os dados locais.
 
-Para habilitar também a LocalStack/SQS na porta `4566`, configure `SQS_ENABLED=true` e um `LOCALSTACK_AUTH_TOKEN` válido no `.env`, depois inicie com `docker compose --profile sqs up --build`. O Compose inicia a LocalStack e cria a fila FIFO `domain-events.fifo`. Não compartilhe nem commite o `.env`.
+Para habilitar também a LocalStack/SQS na porta `4566`, configure `SQS_ENABLED=true` e um `LOCALSTACK_AUTH_TOKEN` válido no `.env`, depois inicie com `docker compose --profile sqs up --build`. O Compose cria as filas `domain-events.fifo`, `wager-transactions.fifo` e `wager-transactions-dlq.fifo`. Não compartilhe nem commite o `.env`.
 
 O realm `backend` configura o client de serviço `wallet-service`, o audience `backend-api`, as roles locais `wallet:write` e `wager:write`, e a identidade `local-provider`. Para obter um token de desenvolvimento:
 
@@ -75,13 +75,21 @@ Os endpoints `GET /wallets/{walletId}` e `GET /wallets/{walletId}/ledger` exigem
 
 `POST /wallets/{walletId}/reconciliation` exige `wallet:write` e compara o saldo salvo com a soma exata dos créditos e débitos do ledger em uma única consulta SQL. O endpoint não altera a carteira; divergências retornam `consistent: false`, geram log estruturado e incrementam `wallet_reconciliation_divergences_total`, exposta em `GET /metrics`.
 
-`GET /health/live` é público e confirma que o processo HTTP responde. `GET /health/ready` é público, aplica timeout de dois segundos e verifica PostgreSQL; quando `SQS_ENABLED=true`, também verifica a fila SQS e retorna `503` quando uma dependência não responde. Com SQS habilitado, o publisher lê a outbox com lease, publica eventos agrupados por agregado e usa o `eventId` como chave de deduplicação. Se o envio falhar, agenda retry com backoff exponencial, limitado a uma hora. Sem SQS, os eventos ficam pendentes na outbox até o publisher ser habilitado.
+`GET /health/live` é público e confirma que o processo HTTP responde. `GET /health/ready` é público, aplica timeout de dois segundos e verifica PostgreSQL; quando `SQS_ENABLED=true`, também verifica as filas de entrada e saída e retorna `503` quando uma dependência não responde. Com SQS habilitado, o publisher lê a outbox com lease, publica eventos agrupados por agregado e usa o `eventId` como chave de deduplicação. Se o envio falhar, agenda retry com backoff exponencial, limitado a uma hora. Sem SQS, os eventos ficam pendentes na outbox até o publisher ser habilitado.
 
 Para conferir mensagens locais na fila de eventos:
 
 ```powershell
   docker compose exec localstack awslocal sqs receive-message --queue-url http://localhost:4566/queue/us-east-1/000000000000/domain-events.fifo --max-number-of-messages 10
 ```
+
+## Consumidor SQS
+
+O consumidor recebe mensagens `WagerTransactionRequested` da fila FIFO `wager-transactions.fifo`. Usa `data.idempotencyKey` para idempotência financeira e `(consumerName, messageId)` mais SHA-256 do corpo para deduplicação durável. O inbox, a operação financeira, o ledger e a outbox são confirmados na mesma transação PostgreSQL. A mensagem só é removida do SQS depois do commit.
+
+Erros deixam a mensagem na fila e ajustam sua visibilidade com backoff de 1, 2, 4, 8 e 16 segundos. Após cinco recebimentos, a configuração de redrive move a mensagem para `wager-transactions-dlq.fifo`. Cada worker faz long polling de até 20 segundos, recebe uma mensagem por vez e limita o processamento a 45 segundos dentro do timeout de visibilidade de 60 segundos. Várias instâncias podem processar grupos diferentes em paralelo. Em shutdown, o worker para de buscar e cancela a transação ativa; a mensagem não removida será entregue novamente.
+
+O `MessageGroupId` de entrada deve identificar a carteira para preservar a ordem por carteira. O `MessageDeduplicationId` deve identificar a mensagem do provedor; a inbox no PostgreSQL continua necessária porque a deduplicação FIFO da AWS tem janela limitada. Na saída, o publisher usa o agregado como `MessageGroupId` e o `eventId` como `MessageDeduplicationId`.
 
 ## Verificações disponíveis
 
