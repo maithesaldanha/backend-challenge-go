@@ -125,6 +125,60 @@ func TestOutboxDispatcherPersistsRetryAndPublishesAfterBackoff(t *testing.T) {
 	assertOutboxState(t, ctx, db, event.ID, 2, true, false)
 }
 
+func TestOutboxDispatcherPreservesAggregateOrderWhenEventsShareTimestamp(t *testing.T) {
+	ctx, db, transactor := newOutboxIntegrationDatabase(t)
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	aggregateID := uuid.NewString()
+	first := events.Event{
+		ID: "ffffffff-ffff-4fff-8fff-ffffffffffff", AggregateID: aggregateID, Type: "FirstEvent",
+		CorrelationID: uuid.NewString(), OccurredAt: now, Version: 1, Payload: json.RawMessage(`{"order":1}`),
+	}
+	second := events.Event{
+		ID: "00000000-0000-4000-8000-000000000000", AggregateID: aggregateID, Type: "SecondEvent",
+		CorrelationID: uuid.NewString(), OccurredAt: now, Version: 1, Payload: json.RawMessage(`{"order":2}`),
+	}
+	appendOutboxEvent(t, ctx, transactor, first)
+	appendOutboxEvent(t, ctx, transactor, second)
+	currentTime := now
+	var publishedIDs []string
+	publisher := publisherFunc(func(_ context.Context, event events.Event) error {
+		if len(publishedIDs) == 0 {
+			publishedIDs = append(publishedIDs, event.ID)
+			return errors.New("temporary publish failure")
+		}
+		publishedIDs = append(publishedIDs, event.ID)
+		return nil
+	})
+	dispatcher, err := outbox.NewDispatcher(transactor, publisher, func() time.Time { return currentTime })
+	if err != nil {
+		t.Fatal(err)
+	}
+	worked, err := dispatcher.ProcessOne(ctx)
+	if !worked || err == nil {
+		t.Fatalf("first ProcessOne() = (%t, %v), want (true, publish error)", worked, err)
+	}
+	worked, err = dispatcher.ProcessOne(ctx)
+	if err != nil || worked {
+		t.Fatalf("ProcessOne() while first event is in backoff = (%t, %v), want (false, nil)", worked, err)
+	}
+	if len(publishedIDs) != 1 || publishedIDs[0] != first.ID {
+		t.Fatalf("published IDs before retry = %v, want only the first event %s", publishedIDs, first.ID)
+	}
+
+	currentTime = now.Add(2 * time.Second)
+	for i := 0; i < 2; i++ {
+		worked, err = dispatcher.ProcessOne(ctx)
+		if err != nil || !worked {
+			t.Fatalf("ProcessOne() after backoff, iteration %d = (%t, %v), want (true, nil)", i, worked, err)
+		}
+	}
+	if len(publishedIDs) != 3 || publishedIDs[0] != first.ID || publishedIDs[1] != first.ID || publishedIDs[2] != second.ID {
+		t.Fatalf("published IDs = %v, want first event attempts before second event", publishedIDs)
+	}
+	assertOutboxState(t, ctx, db, first.ID, 2, true, false)
+	assertOutboxState(t, ctx, db, second.ID, 1, true, false)
+}
+
 type publisherFunc func(context.Context, events.Event) error
 
 func (f publisherFunc) Publish(ctx context.Context, event events.Event) error {
@@ -169,6 +223,13 @@ func newOutboxIntegrationDatabase(t *testing.T) (context.Context, *sql.DB, ports
 	}
 	if _, err := db.ExecContext(ctx, string(migration)); err != nil {
 		t.Fatalf("apply schema migration: %v", err)
+	}
+	outboxMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "000003_outbox_sequence.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, string(outboxMigration)); err != nil {
+		t.Fatalf("apply outbox sequence migration: %v", err)
 	}
 	transactor, err := postgres.NewTransactor(db)
 	if err != nil {

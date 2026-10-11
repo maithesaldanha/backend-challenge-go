@@ -6,7 +6,7 @@ API de carteiras e transações de apostas com PostgreSQL, autenticação OIDC v
 
 O repositório contém o domínio de dinheiro, carteiras e transações; casos de uso para abertura e leitura de carteiras, apostas, ganhos, perdas e reversões; adapters HTTP, PostgreSQL, Keycloak e SQS; migrations; publisher outbox; e consumidor SQS.
 
-A cobertura atual inclui testes unitários de domínio e aplicação, testes do dispatcher outbox, testes HTTP de autorização e isolamento de provider, testes do consumidor e testes PostgreSQL de idempotência/atomicidade, concorrência entre três processos e exclusão de claims concorrentes da outbox com retry após backoff. Ainda faltam testes ponta a ponta com Keycloak, HTTP e PostgreSQL, testes com um broker SQS real, falhas controladas de publisher/consumer, reinicialização e vários cenários de recuperação descritos em [ARCHITECTURE.md](ARCHITECTURE.md). Os testes de integração PostgreSQL precisam de `TEST_DATABASE_URL` para rodar; sem essa variável, eles são ignorados.
+A cobertura atual inclui testes unitários de domínio e aplicação, testes do dispatcher outbox, testes HTTP de autorização e isolamento de provider, testes do consumidor e testes PostgreSQL de idempotência/atomicidade, concorrência entre três processos, exclusão de claims concorrentes, retry após backoff e ordenação de eventos por agregado. Ainda faltam testes ponta a ponta com Keycloak, HTTP e PostgreSQL, testes com um broker SQS real, falhas controladas de publisher/consumer, reinicialização e vários cenários de recuperação descritos em [ARCHITECTURE.md](ARCHITECTURE.md). Os testes de integração PostgreSQL precisam de `TEST_DATABASE_URL` para rodar; sem essa variável, eles são ignorados.
 
 O enunciado completo está em [CHALLENGE.md](CHALLENGE.md). As decisões e limitações técnicas estão em [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -51,7 +51,7 @@ Aguarde PostgreSQL e Keycloak ficarem saudáveis e a API iniciar. Endereços loc
 | PostgreSQL | `localhost:5433` |
 | Keycloak | `http://localhost:8081` |
 
-Nesse modo, a API grava eventos na outbox PostgreSQL, mas não os publica. `/health/ready` verifica PostgreSQL. A migration `000001_init.up.sql` é aplicada automaticamente quando o volume do banco é criado vazio. A migration `000002_wallet_ledger_read_index.up.sql` deve ser aplicada manualmente quando necessária.
+Nesse modo, a API grava eventos na outbox PostgreSQL, mas não os publica. `/health/ready` verifica PostgreSQL. A migration `000001_init.up.sql` é aplicada automaticamente quando o volume do banco é criado vazio. As migrations `000002_wallet_ledger_read_index.up.sql` e `000003_outbox_sequence.up.sql` devem ser aplicadas manualmente quando necessárias.
 
 Para parar os serviços preservando os dados:
 
@@ -114,16 +114,23 @@ O ledger aceita `limit` de 1 a 100 (padrão 50) e devolve `nextCursor` opaco. A 
 
 A migration inicial é automática apenas para volume vazio. Para atualizar um banco existente, aplique migrations pendentes na ordem. Execute **um comando por vez**, conforme a operação desejada.
 
-Aplicar o índice de leitura do ledger:
+Aplicar as migrations `000002` e `000003`:
 
 ```powershell
 Get-Content migrations/000002_wallet_ledger_read_index.up.sql | docker compose exec -T postgres psql -U backend -d backend
+Get-Content migrations/000003_outbox_sequence.up.sql | docker compose exec -T postgres psql -U backend -d backend
 ```
 
 Reverter somente esse índice:
 
 ```powershell
 Get-Content migrations/000002_wallet_ledger_read_index.down.sql | docker compose exec -T postgres psql -U backend -d backend
+```
+
+Para reverter a ordenação da outbox:
+
+```powershell
+Get-Content migrations/000003_outbox_sequence.down.sql | docker compose exec -T postgres psql -U backend -d backend
 ```
 
 A reversão da migration inicial remove tabelas e dados. Use-a somente quando realmente quiser apagar o schema:

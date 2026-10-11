@@ -538,9 +538,9 @@ func (r outboxRepository) ClaimDue(ctx context.Context, now, leaseUntil time.Tim
 					SELECT 1 FROM outbox_events earlier
 					WHERE earlier.aggregate_id = current.aggregate_id
 						AND earlier.published_at IS NULL
-						AND (earlier.created_at, earlier.event_id) < (current.created_at, current.event_id)
+						AND earlier.sequence_id < current.sequence_id
 				)
-			ORDER BY current.next_attempt_at, current.created_at, current.event_id
+			ORDER BY current.next_attempt_at, current.sequence_id
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
