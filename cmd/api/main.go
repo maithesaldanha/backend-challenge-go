@@ -11,9 +11,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/auth"
+	"github.com/junglegaming/backend-challenge-go/internal/adapters/awssqs"
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/httpapi"
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/postgres"
 	applicationhealth "github.com/junglegaming/backend-challenge-go/internal/application/health"
+	applicationoutbox "github.com/junglegaming/backend-challenge-go/internal/application/outbox"
 	"github.com/junglegaming/backend-challenge-go/internal/application/ports"
 	applicationwager "github.com/junglegaming/backend-challenge-go/internal/application/wager"
 	applicationwallet "github.com/junglegaming/backend-challenge-go/internal/application/wallet"
@@ -26,17 +28,14 @@ func main() {
 		log.Printf("invalid configuration: %v", err)
 		os.Exit(1)
 	}
-	app := fx.New(
+	options := []fx.Option{
 		postgres.Module(config.postgres),
+		fx.Supply(config.sqs),
 		auth.Module(config.keycloak),
 		httpapi.Module(config.http),
 		fx.Provide(
 			func(transactor *postgres.Transactor) ports.Transactor { return transactor },
 			func(db *sql.DB) (*postgres.HealthChecker, error) { return postgres.NewHealthChecker(db) },
-			func(checker *postgres.HealthChecker) ports.HealthChecker { return checker },
-			func(checker ports.HealthChecker) (*applicationhealth.Readiness, error) {
-				return applicationhealth.NewReadiness(checker)
-			},
 			func(transactor ports.Transactor) (*applicationwallet.OpenWallet, error) {
 				return applicationwallet.NewOpenWallet(transactor, uuid.NewString, func() time.Time {
 					return time.Now().UTC()
@@ -81,12 +80,76 @@ func main() {
 			},
 		),
 		fx.Invoke(registerReferenceRetryWorker),
-	)
+	}
+	if config.sqsEnabled {
+		options = append(options,
+			fx.Provide(
+				func(sqsConfig awssqs.Config) (*awssqs.Client, error) { return awssqs.New(sqsConfig) },
+				func(client *awssqs.Client) applicationoutbox.Publisher { return client },
+				func(database *postgres.HealthChecker, queue *awssqs.Client) (*applicationhealth.Readiness, error) {
+					return applicationhealth.NewReadiness(database, queue)
+				},
+				func(transactor ports.Transactor, publisher applicationoutbox.Publisher) (*applicationoutbox.Dispatcher, error) {
+					return applicationoutbox.NewDispatcher(transactor, publisher, func() time.Time { return time.Now().UTC() })
+				},
+			),
+			fx.Invoke(registerOutboxPublisherWorker),
+		)
+	} else {
+		options = append(options, fx.Provide(func(database *postgres.HealthChecker) (*applicationhealth.Readiness, error) {
+			return applicationhealth.NewReadiness(database)
+		}))
+	}
+	app := fx.New(options...)
 	if err := app.Err(); err != nil {
 		log.Printf("application setup failed: %v", err)
 		os.Exit(1)
 	}
 	app.Run()
+}
+
+func registerOutboxPublisherWorker(lifecycle fx.Lifecycle, dispatcher *applicationoutbox.Dispatcher) {
+	var cancel context.CancelFunc
+	var done chan struct{}
+	lifecycle.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			workerContext, stop := context.WithCancel(context.Background())
+			cancel = stop
+			done = make(chan struct{})
+			go func() {
+				defer close(done)
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+				for {
+					worked, err := dispatcher.ProcessOne(workerContext)
+					if err != nil {
+						log.Printf("outbox publish attempt failed: %v", err)
+					}
+					if worked {
+						continue
+					}
+					select {
+					case <-workerContext.Done():
+						return
+					case <-ticker.C:
+					}
+				}
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			if cancel == nil {
+				return nil
+			}
+			cancel()
+			select {
+			case <-done:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	})
 }
 
 func registerReferenceRetryWorker(lifecycle fx.Lifecycle, processor *applicationwager.RetryPendingReferences) {
@@ -134,9 +197,11 @@ func registerReferenceRetryWorker(lifecycle fx.Lifecycle, processor *application
 }
 
 type appConfig struct {
-	postgres postgres.Config
-	keycloak auth.Config
-	http     httpapi.ServerConfig
+	postgres   postgres.Config
+	keycloak   auth.Config
+	http       httpapi.ServerConfig
+	sqs        awssqs.Config
+	sqsEnabled bool
 }
 
 func loadConfig() (appConfig, error) {
@@ -156,14 +221,26 @@ func loadConfig() (appConfig, error) {
 	if err != nil {
 		return appConfig{}, err
 	}
+	sqsEnabled := strings.EqualFold(strings.TrimSpace(os.Getenv("SQS_ENABLED")), "true")
+	queueURL := strings.TrimSpace(os.Getenv("SQS_QUEUE_URL"))
+	if sqsEnabled && queueURL == "" {
+		return appConfig{}, fmt.Errorf("SQS_QUEUE_URL is required when SQS_ENABLED=true")
+	}
+	region := strings.TrimSpace(os.Getenv("AWS_REGION"))
+	if region == "" {
+		region = "us-east-1"
+	}
+	sqsEndpoint := strings.TrimSpace(os.Getenv("SQS_ENDPOINT_URL"))
 	address := strings.TrimSpace(os.Getenv("HTTP_ADDR"))
 	if address == "" {
 		address = ":8080"
 	}
 	return appConfig{
-		postgres: postgres.Config{DSN: databaseURL},
-		keycloak: auth.Config{IssuerURL: issuerURL, JWKSURL: jwksURL, Audience: audience},
-		http:     httpapi.ServerConfig{Address: address},
+		postgres:   postgres.Config{DSN: databaseURL},
+		keycloak:   auth.Config{IssuerURL: issuerURL, JWKSURL: jwksURL, Audience: audience},
+		http:       httpapi.ServerConfig{Address: address},
+		sqs:        awssqs.Config{Region: region, Endpoint: sqsEndpoint, QueueURL: queueURL},
+		sqsEnabled: sqsEnabled,
 	}, nil
 }
 

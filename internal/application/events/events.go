@@ -14,9 +14,16 @@ type Event struct {
 	AggregateID   string
 	Type          string
 	CorrelationID string
+	CausationID   string
 	OccurredAt    time.Time
 	Version       int
 	Payload       json.RawMessage
+}
+
+type OutboxRecord struct {
+	Event      Event
+	Attempts   int
+	LeaseUntil time.Time
 }
 
 type WagerTransactionProcessedData struct {

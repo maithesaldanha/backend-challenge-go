@@ -73,4 +73,7 @@ type LedgerCursor struct {
 
 type OutboxRepository interface {
 	Append(context.Context, events.Event) error
+	ClaimDue(context.Context, time.Time, time.Time) (events.OutboxRecord, error)
+	MarkPublished(context.Context, string, time.Time, time.Time) error
+	ScheduleRetry(context.Context, string, time.Time, time.Time) error
 }

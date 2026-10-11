@@ -466,10 +466,80 @@ type outboxRepository struct{ tx *sql.Tx }
 func (r outboxRepository) Append(ctx context.Context, event events.Event) error {
 	_, err := r.tx.ExecContext(ctx, `
 		INSERT INTO outbox_events (
-			event_id, aggregate_id, event_type, correlation_id, occurred_at,
+			event_id, aggregate_id, event_type, correlation_id, causation_id, occurred_at,
 			event_version, payload, next_attempt_at, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $5, $5)`,
-		event.ID, event.AggregateID, event.Type, event.CorrelationID, event.OccurredAt,
+		) VALUES ($1, $2, $3, $4, NULLIF($5, '')::uuid, $6, $7, $8::jsonb, $6, $6)`,
+		event.ID, event.AggregateID, event.Type, event.CorrelationID, event.CausationID, event.OccurredAt,
 		event.Version, string(event.Payload))
 	return mapError(err)
+}
+
+func (r outboxRepository) ClaimDue(ctx context.Context, now, leaseUntil time.Time) (events.OutboxRecord, error) {
+	var record events.OutboxRecord
+	var eventID, aggregateID, eventType, correlationID, payload string
+	var causationID sql.NullString
+	var occurredAt, storedLeaseUntil time.Time
+	var version, attempts int
+	err := r.tx.QueryRowContext(ctx, `
+		WITH candidate AS (
+			SELECT event_id
+			FROM outbox_events current
+			WHERE current.published_at IS NULL
+				AND current.next_attempt_at <= $1
+				AND (current.lease_until IS NULL OR current.lease_until <= $1)
+				AND NOT EXISTS (
+					SELECT 1 FROM outbox_events earlier
+					WHERE earlier.aggregate_id = current.aggregate_id
+						AND earlier.published_at IS NULL
+						AND (earlier.created_at, earlier.event_id) < (current.created_at, current.event_id)
+				)
+			ORDER BY current.next_attempt_at, current.created_at, current.event_id
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE outbox_events AS target
+		SET attempts = target.attempts + 1, lease_until = $2
+		FROM candidate
+		WHERE target.event_id = candidate.event_id
+		RETURNING target.event_id::text, target.aggregate_id::text, target.event_type,
+			target.correlation_id, target.causation_id::text, target.occurred_at,
+			target.event_version, target.payload::text, target.attempts, target.lease_until`, now, leaseUntil,
+	).Scan(&eventID, &aggregateID, &eventType, &correlationID, &causationID, &occurredAt, &version, &payload, &attempts, &storedLeaseUntil)
+	if errors.Is(err, sql.ErrNoRows) {
+		return events.OutboxRecord{}, ports.ErrNotFound
+	}
+	if err != nil {
+		return events.OutboxRecord{}, mapError(err)
+	}
+	event := events.Event{ID: eventID, AggregateID: aggregateID, Type: eventType, CorrelationID: correlationID, CausationID: causationID.String, OccurredAt: occurredAt.UTC(), Version: version, Payload: []byte(payload)}
+	record = events.OutboxRecord{Event: event, Attempts: attempts, LeaseUntil: storedLeaseUntil.UTC()}
+	return record, nil
+}
+
+func (r outboxRepository) MarkPublished(ctx context.Context, eventID string, leaseUntil, publishedAt time.Time) error {
+	result, err := r.tx.ExecContext(ctx, `
+		UPDATE outbox_events SET published_at = $1, lease_until = NULL
+		WHERE event_id = $2 AND published_at IS NULL AND lease_until = $3`, publishedAt, eventID, leaseUntil)
+	return updateOutboxLeaseResult(result, err)
+}
+
+func (r outboxRepository) ScheduleRetry(ctx context.Context, eventID string, leaseUntil, nextAttemptAt time.Time) error {
+	result, err := r.tx.ExecContext(ctx, `
+		UPDATE outbox_events SET next_attempt_at = $1, lease_until = NULL
+		WHERE event_id = $2 AND published_at IS NULL AND lease_until = $3`, nextAttemptAt, eventID, leaseUntil)
+	return updateOutboxLeaseResult(result, err)
+}
+
+func updateOutboxLeaseResult(result sql.Result, err error) error {
+	if err != nil {
+		return mapError(err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ports.ErrConflict
+	}
+	return nil
 }

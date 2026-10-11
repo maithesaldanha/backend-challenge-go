@@ -321,3 +321,15 @@ func (r *memoryOutbox) Append(_ context.Context, event events.Event) error {
 	r.events = append(r.events, event)
 	return nil
 }
+
+func (r *memoryOutbox) ClaimDue(context.Context, time.Time, time.Time) (events.OutboxRecord, error) {
+	return events.OutboxRecord{}, ports.ErrNotFound
+}
+
+func (r *memoryOutbox) MarkPublished(context.Context, string, time.Time, time.Time) error {
+	return nil
+}
+
+func (r *memoryOutbox) ScheduleRetry(context.Context, string, time.Time, time.Time) error {
+	return nil
+}

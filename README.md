@@ -2,20 +2,22 @@
 
 ## Estado atual
 
-O repositório está em implementação incremental. Estão disponíveis a abertura, leitura e reconciliação de carteiras, leitura paginada do ledger, processamento e consulta de transações (`BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK`), persistência PostgreSQL, autenticação Keycloak e endpoints de liveness/readiness do PostgreSQL. Consumidor SQS, publicação da outbox, readiness do SQS e testes abrangentes ainda não estão implementados.
+O repositório está em implementação incremental. Estão disponíveis a abertura, leitura e reconciliação de carteiras, leitura paginada do ledger, processamento e consulta de transações (`BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK`), persistência PostgreSQL, autenticação Keycloak, health checks e publicação da outbox para SQS FIFO. O consumidor SQS e testes abrangentes ainda não estão implementados.
 
 ## Executar localmente com Docker Compose
 
 Pré-requisitos: Docker Desktop com Compose e Go compatível com a versão declarada em `go.mod`.
 
 1. Copie `.env.example` para `.env` na raiz. No PowerShell: `Copy-Item .env.example .env`. Os valores são apenas para desenvolvimento local.
-2. Inicie os serviços:
+2. Inicie os serviços sem SQS:
 
 ```powershell
 docker compose up --build
 ```
 
-O PostgreSQL fica disponível na porta `5433`, o Keycloak na `8081` e a API na `8080`. O schema inicial é aplicado automaticamente quando o volume do PostgreSQL é criado pela primeira vez. Se já existir um volume antigo, aplique as migrations conforme a seção abaixo; `docker compose down -v` apaga os dados locais.
+O PostgreSQL fica disponível na porta `5433`, o Keycloak na `8081` e a API na `8080`. Nesse modo, a API processa e persiste operações, mas os eventos permanecem na outbox do PostgreSQL sem serem publicados; `/health/ready` verifica apenas o banco. O schema inicial é aplicado automaticamente quando o volume do PostgreSQL é criado pela primeira vez. Se já existir um volume antigo, aplique as migrations conforme a seção abaixo; `docker compose down -v` apaga os dados locais.
+
+Para habilitar também a LocalStack/SQS na porta `4566`, configure `SQS_ENABLED=true` e um `LOCALSTACK_AUTH_TOKEN` válido no `.env`, depois inicie com `docker compose --profile sqs up --build`. O Compose inicia a LocalStack e cria a fila FIFO `domain-events.fifo`. Não compartilhe nem commite o `.env`.
 
 O realm `backend` configura o client de serviço `wallet-service`, o audience `backend-api`, as roles locais `wallet:write` e `wager:write`, e a identidade `local-provider`. Para obter um token de desenvolvimento:
 
@@ -73,7 +75,13 @@ Os endpoints `GET /wallets/{walletId}` e `GET /wallets/{walletId}/ledger` exigem
 
 `POST /wallets/{walletId}/reconciliation` exige `wallet:write` e compara o saldo salvo com a soma exata dos créditos e débitos do ledger em uma única consulta SQL. O endpoint não altera a carteira; divergências retornam `consistent: false`, geram log estruturado e incrementam `wallet_reconciliation_divergences_total`, exposta em `GET /metrics`.
 
-`GET /health/live` é público e confirma que o processo HTTP responde. `GET /health/ready` é público, aplica timeout de dois segundos e verifica PostgreSQL; retorna `503` quando o banco não responde. A checagem de SQS será adicionada junto com a integração do broker, que ainda não está implementada.
+`GET /health/live` é público e confirma que o processo HTTP responde. `GET /health/ready` é público, aplica timeout de dois segundos e verifica PostgreSQL; quando `SQS_ENABLED=true`, também verifica a fila SQS e retorna `503` quando uma dependência não responde. Com SQS habilitado, o publisher lê a outbox com lease, publica eventos agrupados por agregado e usa o `eventId` como chave de deduplicação. Se o envio falhar, agenda retry com backoff exponencial, limitado a uma hora. Sem SQS, os eventos ficam pendentes na outbox até o publisher ser habilitado.
+
+Para conferir mensagens locais na fila de eventos:
+
+```powershell
+  docker compose exec localstack awslocal sqs receive-message --queue-url http://localhost:4566/queue/us-east-1/000000000000/domain-events.fifo --max-number-of-messages 10
+```
 
 ## Verificações disponíveis
 
